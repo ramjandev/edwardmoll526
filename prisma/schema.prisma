@@ -1,0 +1,205 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+enum BookingStatus {
+  QUOTED
+  DEPOSIT_PENDING
+  DEPOSIT_PAID
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  BALANCE_PENDING
+  BALANCE_PAID
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentType {
+  DEPOSIT
+  BALANCE
+  REFUND
+}
+
+enum PaymentStatus {
+  REQUIRES_ACTION
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum WebhookSource {
+  STRIPE
+  JOBBER
+}
+
+enum AdminRole {
+  OWNER
+  ADMIN
+  STAFF
+}
+
+model Customer {
+  id               String         @id @default(uuid())
+  firstName        String
+  lastName         String
+  email            String         @unique
+  phone            String
+  addressLine1     String?        @map("address_line_1")
+  addressLine2     String?        @map("address_line_2")
+  city             String?
+  state            String?
+  zip              String?
+  jobberCustomerId String?        @unique @map("jobber_customer_id")
+  stripeCustomerId String?        @unique @map("stripe_customer_id")
+  quotes           Quote[]
+  bookings         Booking[]
+  notifications    Notification[]
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  @@index([email])
+  @@index([phone])
+  @@map("customers")
+}
+
+model Quote {
+  id             String   @id @default(uuid())
+  customerId     String   @map("customer_id")
+  customer       Customer @relation(fields: [customerId], references: [id])
+  rawInputs      Json     @map("raw_inputs")
+  rawOutput      Json     @map("raw_output")
+  estimatedTotal Decimal  @map("estimated_total") @db.Decimal(10, 2)
+  sourceSheetId  String?  @map("source_sheet_id")
+  booking        Booking?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("quotes")
+}
+
+model Booking {
+  id                    String        @id @default(uuid())
+  customerId            String        @map("customer_id")
+  customer              Customer      @relation(fields: [customerId], references: [id])
+  quoteId               String        @unique @map("quote_id")
+  quote                 Quote         @relation(fields: [quoteId], references: [id])
+  status                BookingStatus @default(QUOTED)
+  requestedDate         DateTime      @map("requested_date")
+  confirmedDate         DateTime?     @map("confirmed_date")
+  depositAmount         Decimal       @map("deposit_amount") @db.Decimal(10, 2)
+  balanceAmount         Decimal       @map("balance_amount") @db.Decimal(10, 2)
+  totalAmount           Decimal       @map("total_amount") @db.Decimal(10, 2)
+  jobberJobId           String?       @unique @map("jobber_job_id")
+  stripePaymentMethodId String?       @map("stripe_payment_method_id")
+  payments              Payment[]
+  notifications         Notification[]
+  cancelledAt           DateTime?     @map("cancelled_at")
+  cancellationReason    String?       @map("cancellation_reason")
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  @@index([customerId])
+  @@index([status])
+  @@map("bookings")
+}
+
+model Payment {
+  id                    String        @id @default(uuid())
+  bookingId             String        @map("booking_id")
+  booking               Booking       @relation(fields: [bookingId], references: [id])
+  type                  PaymentType
+  status                PaymentStatus @default(REQUIRES_ACTION)
+  amount                Decimal       @db.Decimal(10, 2)
+  currency              String        @default("usd")
+  stripePaymentIntentId String?       @unique @map("stripe_payment_intent_id")
+  stripeChargeId        String?       @map("stripe_charge_id")
+  stripeRefundId        String?       @map("stripe_refund_id")
+  failureReason         String?       @map("failure_reason")
+  retryCount            Int           @default(0) @map("retry_count")
+  paidAt                DateTime?     @map("paid_at")
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  @@index([bookingId])
+  @@index([status])
+  @@map("payments")
+}
+
+model Notification {
+  id           String              @id @default(uuid())
+  customerId   String              @map("customer_id")
+  customer     Customer            @relation(fields: [customerId], references: [id])
+  bookingId    String?             @map("booking_id")
+  booking      Booking?            @relation(fields: [bookingId], references: [id])
+  channel      NotificationChannel
+  type         String
+  status       NotificationStatus  @default(QUEUED)
+  recipient    String
+  subject      String?
+  body         String?
+  providerId   String?             @map("provider_id")
+  errorMessage String?             @map("error_message")
+  sentAt       DateTime?           @map("sent_at")
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@index([bookingId])
+  @@map("notifications")
+}
+
+model WebhookEvent {
+  id              String        @id @default(uuid())
+  source          WebhookSource
+  eventType       String        @map("event_type")
+  externalId      String?       @map("external_id")
+  payload         Json
+  processed       Boolean       @default(false)
+  processingError String?       @map("processing_error")
+  receivedAt      DateTime      @default(now()) @map("received_at")
+  processedAt     DateTime?     @map("processed_at")
+
+  @@unique([source, externalId])
+  @@index([processed])
+  @@map("webhook_events")
+}
+
+model JobberTokens {
+  id           String   @id @default(uuid())
+  accountId    String   @unique @map("account_id")
+  accessToken  String   @map("access_token")
+  refreshToken String   @map("refresh_token")
+  expiresAt    DateTime @map("expires_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("jobber_tokens")
+}
+
+model AdminUser {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  role         AdminRole @default(STAFF)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+
+  @@map("admin_users")
+}
