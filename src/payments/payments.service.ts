@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException, NotFoundException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import Stripe from 'stripe';
-import { PaymentType, PaymentStatus, BookingStatus } from '../../generated/prisma/client';
+import { PaymentType, PaymentStatus, BookingStatus } from '../generated/prisma/client';
 
 @Injectable()
 export class PaymentsService {

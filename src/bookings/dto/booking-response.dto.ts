@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { BookingStatus } from '../../../generated/prisma/client';
+import { BookingStatus } from '../../generated/prisma/client';
 
 class CustomerDetailsDto {
   @ApiProperty({ example: '83a9c479-e976-49c8-9631-81c1439b20f3' })

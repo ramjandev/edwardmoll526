@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { AdminRole } from '../../../generated/prisma/client';
+import { AdminRole } from '../../generated/prisma/client';
 
 class AdminUserSummaryDto {
   @ApiProperty({ example: '32b35a8f-287c-4c6e-82d9-e9df259b19e2' })

@@ -1,7 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
-import { NotificationChannel, NotificationStatus } from '../../generated/prisma/client';
+import { NotificationChannel, NotificationStatus } from '../generated/prisma/client';
 import * as nodemailer from 'nodemailer';
 import { Twilio } from 'twilio';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';

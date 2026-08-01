@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsString, IsNotEmpty, IsEnum, IsOptional, IsUUID } from 'class-validator';
-import { NotificationChannel } from '../../generated/prisma/client';
+import { NotificationChannel } from '../generated/prisma/client';
 
 export class SendNotificationDto {
   @ApiProperty({ example: '83a9c479-e976-49c8-9631-81c1439b20f3', description: 'The customer database ID' })

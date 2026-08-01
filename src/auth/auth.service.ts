@@ -3,7 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
-import { AdminRole } from '../../generated/prisma/client';
+import { AdminRole } from '../generated/prisma/client';
 
 @Injectable()
 export class AuthService implements OnModuleInit {

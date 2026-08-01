@@ -9,7 +9,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { BookingStatus, WebhookSource, PaymentType, PaymentStatus } from '../../generated/prisma/client';
+import { BookingStatus, WebhookSource, PaymentType, PaymentStatus } from '../generated/prisma/client';
 
 @ApiTags('Bookings & Scheduling')
 @Controller('bookings')

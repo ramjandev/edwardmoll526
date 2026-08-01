@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
-import { AdminRole } from '../../../generated/prisma/client';
+import { AdminRole } from '../../generated/prisma/client';
 
 export class LoginDto {
   @ApiProperty({ example: 'admin@movingphoenix.com', description: 'Administrator email' })

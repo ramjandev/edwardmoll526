@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateBookingDto } from './dto/booking.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { BookingStatus } from '../../generated/prisma/client';
+import { BookingStatus } from '../generated/prisma/client';
 
 @Injectable()
 export class BookingsService {

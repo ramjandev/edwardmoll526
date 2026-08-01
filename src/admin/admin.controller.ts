@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagg
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 import { PaymentsService } from '../payments/payments.service';
-import { PaymentStatus, PaymentType } from '../../generated/prisma/client';
+import { PaymentStatus, PaymentType } from '../generated/prisma/client';
 import { AdminStatsResponseDto } from './dto/admin-stats-response.dto';
 
 @ApiTags('Admin Controls')
