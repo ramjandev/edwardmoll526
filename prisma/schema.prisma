@@ -38,6 +38,7 @@ enum PaymentStatus {
 enum NotificationChannel {
   EMAIL
   SMS
+  PUSH
 }
 
 enum NotificationStatus {
@@ -70,6 +71,7 @@ model Customer {
   zip              String?
   jobberCustomerId String?        @unique @map("jobber_customer_id")
   stripeCustomerId String?        @unique @map("stripe_customer_id")
+  fcmToken         String?        @map("fcm_token")
   quotes           Quote[]
   bookings         Booking[]
   notifications    Notification[]
@@ -200,6 +202,7 @@ model AdminUser {
   role         AdminRole @default(STAFF)
   createdAt    DateTime  @default(now()) @map("created_at")
   lastLoginAt  DateTime? @map("last_login_at")
+  fcmToken     String?   @map("fcm_token")
 
   @@map("admin_users")
 }
