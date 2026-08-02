@@ -30,3 +30,17 @@ export class QuoteResponseDto {
   @ApiProperty({ example: '2026-08-01T02:53:51.000Z' })
   createdAt!: Date;
 }
+
+export class QuoteResponseWrapperDto {
+  @ApiProperty({ example: 200 })
+  statusCode!: number;
+
+  @ApiProperty({ example: true })
+  success!: boolean;
+
+  @ApiProperty({ example: 'Request processed successfully' })
+  message!: string;
+
+  @ApiProperty({ type: QuoteResponseDto })
+  data!: QuoteResponseDto;
+}

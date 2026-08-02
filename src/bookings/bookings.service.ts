@@ -32,6 +32,55 @@ export class BookingsService {
       throw new NotFoundException(`Quote with ID ${dto.quoteId} not found`);
     }
 
+    // Update customer and quote details with actual info if provided
+    if (dto.email) {
+      const emailLower = dto.email.toLowerCase();
+
+      // Check if another customer already has this email to avoid conflict
+      const existingCustomer = await this.prisma.customer.findUnique({
+        where: { email: emailLower },
+      });
+
+      if (existingCustomer && existingCustomer.id !== quote.customerId) {
+        // Re-link quote to the existing customer instead of updating the anonymous one
+        await this.prisma.quote.update({
+          where: { id: quote.id },
+          data: { customerId: existingCustomer.id },
+        });
+        (quote as any).customerId = existingCustomer.id;
+        quote.customer = existingCustomer;
+      } else {
+        // Update the current customer record
+        const updatedCust = await this.prisma.customer.update({
+          where: { id: quote.customerId },
+          data: {
+            firstName: dto.firstName || quote.customer.firstName,
+            lastName: dto.lastName || quote.customer.lastName,
+            email: emailLower,
+            phone: dto.phone || quote.customer.phone,
+            addressLine1: dto.addressLine1 || quote.customer.addressLine1,
+            addressLine2: dto.addressLine2 || quote.customer.addressLine2,
+          },
+        });
+        quote.customer = updatedCust;
+      }
+
+      // Update rawInputs on the quote for logging consistency
+      const updatedInputs = {
+        ...(quote.rawInputs as any),
+        firstName: dto.firstName || (quote.rawInputs as any).firstName,
+        lastName: dto.lastName || (quote.rawInputs as any).lastName,
+        addressLine1: dto.addressLine1 || (quote.rawInputs as any).addressLine1,
+        addressLine2: dto.addressLine2 || (quote.rawInputs as any).addressLine2,
+      };
+
+      await this.prisma.quote.update({
+        where: { id: quote.id },
+        data: { rawInputs: updatedInputs },
+      });
+      quote.rawInputs = updatedInputs;
+    }
+
     // 1. Prevent double booking: check capacity for requested day
     const requestedDate = new Date(dto.movingDate);
     const startOfDay = new Date(requestedDate);

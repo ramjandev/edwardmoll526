@@ -55,3 +55,31 @@ export class BookingResponseDto {
   @ApiProperty({ enum: BookingStatus, example: BookingStatus.DEPOSIT_PENDING })
   status!: BookingStatus;
 }
+
+export class BookingResponseWrapperDto {
+  @ApiProperty({ example: 201 })
+  statusCode!: number;
+
+  @ApiProperty({ example: true })
+  success!: boolean;
+
+  @ApiProperty({ example: 'Request processed successfully' })
+  message!: string;
+
+  @ApiProperty({ type: BookingResponseDto })
+  data!: BookingResponseDto;
+}
+
+export class BookingListResponseWrapperDto {
+  @ApiProperty({ example: 200 })
+  statusCode!: number;
+
+  @ApiProperty({ example: true })
+  success!: boolean;
+
+  @ApiProperty({ example: 'Request processed successfully' })
+  message!: string;
+
+  @ApiProperty({ type: [BookingResponseDto] })
+  data!: BookingResponseDto[];
+}

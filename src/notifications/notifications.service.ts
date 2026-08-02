@@ -294,4 +294,28 @@ export class NotificationsService {
       body: message,
     });
   }
+
+  async sendPushConfirmation(
+    bookingId: string,
+    customerId: string,
+    title: string,
+    body: string,
+  ) {
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+    });
+
+    if (customer && customer.fcmToken) {
+      await this.dispatchNotification({
+        customerId,
+        bookingId,
+        channel: NotificationChannel.PUSH,
+        type: 'booking_alert',
+        title,
+        body,
+      });
+    } else {
+      this.logger.warn(`Skip sending FCM Push: Customer ${customerId} has no registered FCM token.`);
+    }
+  }
 }

@@ -13,3 +13,17 @@ export class PaymentIntentResponseDto {
   @ApiProperty({ example: 'usd' })
   currency!: string;
 }
+
+export class PaymentIntentResponseWrapperDto {
+  @ApiProperty({ example: 201 })
+  statusCode!: number;
+
+  @ApiProperty({ example: true })
+  success!: boolean;
+
+  @ApiProperty({ example: 'Request processed successfully' })
+  message!: string;
+
+  @ApiProperty({ type: PaymentIntentResponseDto })
+  data!: PaymentIntentResponseDto;
+}

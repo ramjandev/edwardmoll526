@@ -2,6 +2,8 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -11,6 +13,12 @@ async function bootstrap() {
 
   // Enable CORS so the Lovable frontend can consume the API
   app.enableCors();
+
+  // Standardize successful API responses globally
+  app.useGlobalInterceptors(new TransformInterceptor());
+
+  // Standardize error API responses globally
+  app.useGlobalFilters(new HttpExceptionFilter());
 
   // Validate all incoming payloads against DTO rules
   app.useGlobalPipes(

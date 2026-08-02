@@ -2,7 +2,7 @@ import { Controller, Post, Get, Body, Req, Headers, BadRequestException, Logger,
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/booking.dto';
-import { BookingResponseDto } from './dto/booking-response.dto';
+import { BookingResponseDto, BookingResponseWrapperDto, BookingListResponseWrapperDto } from './dto/booking-response.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { JobberService } from '../jobber/jobber.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -27,7 +27,7 @@ export class BookingsController {
 
   @Post()
   @ApiOperation({ summary: 'Reserve a moving date (Pending deposit)' })
-  @ApiResponse({ status: 201, description: 'Pending booking created successfully', type: BookingResponseDto })
+  @ApiResponse({ status: 201, description: 'Pending booking created successfully', type: BookingResponseWrapperDto })
   @ApiResponse({ status: 400, description: 'Validation failed or date is fully booked' })
   async createBooking(@Body() dto: CreateBookingDto) {
     return this.bookingsService.createBooking(dto);
@@ -132,6 +132,14 @@ export class BookingsController {
       Number(booking.depositAmount),
     );
 
+    // Send FCM Push alert
+    await this.notificationsService.sendPushConfirmation(
+      bookingId,
+      booking.customerId,
+      'Phoenix Move Scheduled! 🚚',
+      `Hi ${booking.customer.firstName || 'Customer'}, your move is reserved for ${booking.requestedDate.toLocaleDateString()}. Deposit paid successfully.`,
+    );
+
     this.logger.log(`[MOCK PAY SUCCESS] Completed successfully for Booking ${bookingId}. Scheduled in Jobber as Job ID: ${jobberJobId}`);
 
     return {
@@ -149,7 +157,7 @@ export class BookingsController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Retrieve booking log for administrators' })
-  @ApiResponse({ status: 200, description: 'Returns all bookings with quote and payment details' })
+  @ApiResponse({ status: 200, description: 'Returns all bookings with quote and payment details', type: BookingListResponseWrapperDto })
   async getBookings() {
     return this.bookingsService.getBookings();
   }
@@ -337,6 +345,14 @@ export class BookingsController {
             booking.customer.id,
             booking.customer.phone,
             `Hi ${booking.customer.firstName}, your move is scheduled for ${booking.requestedDate.toLocaleDateString()}. Deposit paid: $${depositPaid}. Thanks!`,
+          );
+
+          // Send FCM Push alert
+          await this.notificationsService.sendPushConfirmation(
+            booking.id,
+            booking.customer.id,
+            'Phoenix Move Scheduled! 🚚',
+            `Hi ${booking.customer.firstName || 'Customer'}, your move is reserved for ${booking.requestedDate.toLocaleDateString()}. Deposit paid successfully.`,
           );
         }
 
