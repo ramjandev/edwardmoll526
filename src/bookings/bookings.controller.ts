@@ -1,5 +1,5 @@
 import { Controller, Post, Get, Body, Req, Headers, BadRequestException, Logger, RawBodyRequest, UseGuards, Param } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/booking.dto';
 import { BookingResponseDto } from './dto/booking-response.dto';
@@ -360,6 +360,16 @@ export class BookingsController {
 
   @Post('jobber-webhook')
   @ApiOperation({ summary: 'Jobber Webhook listener (manages job completions)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', example: 'JOB_COMPLETED' },
+        resourceId: { type: 'string', example: 'jobber_job_mock_4726' },
+      },
+      required: ['topic', 'resourceId'],
+    },
+  })
   @ApiResponse({ status: 200, description: 'Jobber webhook event processed' })
   async handleJobberWebhook(@Body() payload: any) {
     this.logger.log(`Ingesting Jobber Webhook: ${JSON.stringify(payload)}`);
