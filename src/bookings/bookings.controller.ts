@@ -82,13 +82,12 @@ export class BookingsController {
     const address = booking.customer.addressLine1 || 'Phoenix, AZ';
 
     // Sync Customer to Jobber
-    const jobberCustomerId = await this.jobberService.createCustomer({
-      firstName: booking.customer.firstName,
-      lastName: booking.customer.lastName,
+    const jobberCustomerId = await this.jobberService.syncCustomer(
+      customerName,
       email,
       phone,
       address,
-    });
+    );
 
     await this.prisma.customer.update({
       where: { id: booking.customerId },
@@ -96,14 +95,21 @@ export class BookingsController {
     });
 
     // Sync moving Job to Jobber
-    const jobDescription = `Phoenix Moving: ${booking.quote.houseSize} on ${booking.requestedDate.toLocaleDateString()}`;
-    const jobberJobId = await this.jobberService.createJob({
-      customerId: jobberCustomerId,
-      title: 'Moving Service Request (Mock Paid)',
-      description: jobDescription,
-      price: Number(booking.totalAmount),
-      scheduledDate: booking.requestedDate,
-    });
+    const jobDescription = `
+      Move details:
+      - Client: ${customerName}
+      - Phone: ${phone}
+      - Moving Date: ${booking.requestedDate.toLocaleDateString()}
+      - Quoted Cost: $${Number(booking.quote.estimatedTotal).toFixed(2)}
+      - Inputs: ${JSON.stringify(booking.quote.rawInputs)}
+    `.trim();
+
+    const jobberJobId = await this.jobberService.createJob(
+      jobberCustomerId,
+      `Phoenix Move - ${customerName}`,
+      booking.requestedDate,
+      jobDescription,
+    );
 
     // Update booking to SCHEDULED
     const updatedBooking = await this.prisma.booking.update({
