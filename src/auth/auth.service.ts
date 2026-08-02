@@ -1,9 +1,15 @@
-import { Injectable, OnModuleInit, UnauthorizedException, ConflictException, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
-import { LoginDto, RegisterDto } from './dto/auth.dto';
 import { AdminRole } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { LoginDto, RegisterDto } from './dto/auth.dto';
 
 @Injectable()
 export class AuthService implements OnModuleInit {
@@ -18,10 +24,10 @@ export class AuthService implements OnModuleInit {
     // Seed default admin if database is empty
     const adminCount = await this.prisma.adminUser.count();
     if (adminCount === 0) {
-      const defaultEmail = 'admin@movingphoenix.com';
-      const defaultPassword = 'DefaultPhoenixPassword2026!';
+      const defaultEmail = 'admin@gmail.com';
+      const defaultPassword = 'Admin@1234';
       const passwordHash = await bcrypt.hash(defaultPassword, 10);
-      
+
       await this.prisma.adminUser.create({
         data: {
           email: defaultEmail,
@@ -34,7 +40,9 @@ export class AuthService implements OnModuleInit {
       this.logger.warn('NO ADMIN USERS FOUND. SEEDED DEFAULT ADMIN ACCOUNT:');
       this.logger.warn(`Email: ${defaultEmail}`);
       this.logger.warn(`Password: ${defaultPassword}`);
-      this.logger.warn('PLEASE CHANGE THIS PASSWORD IMMEDIATELY IN PRODUCTION!');
+      this.logger.warn(
+        'PLEASE CHANGE THIS PASSWORD IMMEDIATELY IN PRODUCTION!',
+      );
       this.logger.warn('----------------------------------------------------');
     }
   }
