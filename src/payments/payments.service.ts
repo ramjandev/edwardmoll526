@@ -135,7 +135,7 @@ export class PaymentsService {
     const balanceAmount = Number(booking.balanceAmount);
     this.logger.log(`Charging remaining balance for Booking ${bookingId}: Amount: $${balanceAmount}`);
 
-    if (this.isMock) {
+    if (this.isMock || paymentMethodId.includes('mock')) {
       const mockIntentId = `pi_mock_balance_${Math.floor(Math.random() * 1000000)}`;
 
       await this.prisma.payment.create({
