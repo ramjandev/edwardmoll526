@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Req, Headers, BadRequestException, Logger, RawBodyRequest, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, Req, Headers, BadRequestException, Logger, RawBodyRequest, UseGuards, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/booking.dto';
@@ -31,6 +31,112 @@ export class BookingsController {
   @ApiResponse({ status: 400, description: 'Validation failed or date is fully booked' })
   async createBooking(@Body() dto: CreateBookingDto) {
     return this.bookingsService.createBooking(dto);
+  }
+
+  @Post(':id/mock-pay-success')
+  @ApiOperation({ summary: 'MOCK ONLY: Simulate a successful Stripe deposit payment and trigger Jobber scheduling' })
+  @ApiResponse({ status: 200, description: 'Booking successfully paid and scheduled' })
+  async mockPaySuccess(@Param('id') bookingId: string) {
+    this.logger.log(`[MOCK PAY SUCCESS] Triggered manually for Booking ${bookingId}`);
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { customer: true, quote: true },
+    });
+
+    if (!booking) {
+      throw new BadRequestException(`Booking ${bookingId} not found`);
+    }
+
+    if (booking.status !== BookingStatus.DEPOSIT_PENDING) {
+      throw new BadRequestException(`Booking ${bookingId} is not in DEPOSIT_PENDING status (current: ${booking.status})`);
+    }
+
+    const mockPaymentIntentId = `pi_mock_manual_${Math.floor(Math.random() * 1000000)}`;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: bookingId },
+        data: {
+          status: BookingStatus.DEPOSIT_PAID,
+          stripePaymentMethodId: 'pm_mock_manual_card_123',
+        },
+      });
+
+      await tx.payment.create({
+        data: {
+          bookingId,
+          type: PaymentType.DEPOSIT,
+          status: PaymentStatus.SUCCEEDED,
+          amount: Number(booking.depositAmount),
+          stripePaymentIntentId: mockPaymentIntentId,
+          paidAt: new Date(),
+        },
+      });
+    });
+
+    // Run Jobber Sync Flow (just like Stripe Webhook)
+    const customerName = `${booking.customer.firstName} ${booking.customer.lastName}`;
+    const email = booking.customer.email;
+    const phone = booking.customer.phone;
+    const address = booking.customer.addressLine1 || 'Phoenix, AZ';
+
+    // Sync Customer to Jobber
+    const jobberCustomerId = await this.jobberService.createCustomer({
+      firstName: booking.customer.firstName,
+      lastName: booking.customer.lastName,
+      email,
+      phone,
+      address,
+    });
+
+    await this.prisma.customer.update({
+      where: { id: booking.customerId },
+      data: { jobberCustomerId },
+    });
+
+    // Sync moving Job to Jobber
+    const jobDescription = `Phoenix Moving: ${booking.quote.houseSize} on ${booking.requestedDate.toLocaleDateString()}`;
+    const jobberJobId = await this.jobberService.createJob({
+      customerId: jobberCustomerId,
+      title: 'Moving Service Request (Mock Paid)',
+      description: jobDescription,
+      price: Number(booking.totalAmount),
+      scheduledDate: booking.requestedDate,
+    });
+
+    // Update booking to SCHEDULED
+    const updatedBooking = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.SCHEDULED,
+        jobberJobId,
+      },
+      include: { customer: true, quote: true },
+    });
+
+    // Send notifications
+    await this.notificationsService.sendBookingConfirmation(
+      bookingId,
+      booking.customerId,
+      email,
+      customerName,
+      booking.requestedDate,
+      Number(booking.totalAmount),
+      Number(booking.depositAmount),
+    );
+
+    this.logger.log(`[MOCK PAY SUCCESS] Completed successfully for Booking ${bookingId}. Scheduled in Jobber as Job ID: ${jobberJobId}`);
+
+    return {
+      message: 'Booking successfully paid and scheduled (Mock Mode)',
+      booking: {
+        id: updatedBooking.id,
+        status: updatedBooking.status,
+        jobberJobId: updatedBooking.jobberJobId,
+        paymentIntentId: mockPaymentIntentId,
+      },
+    };
   }
 
   @Get()
