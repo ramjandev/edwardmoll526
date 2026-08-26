@@ -100,15 +100,17 @@ export class AdminController {
   }
 
   @Post('payments/:id/refund')
-  @ApiOperation({ summary: 'Process a Stripe refund for a payment record' })
-  @ApiResponse({ status: 200, description: 'Refund completed successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid payment or Stripe transaction error' })
+  @ApiOperation({
+    summary: 'Record a refund for a payment (issue the actual refund in Jobber)',
+  })
+  @ApiResponse({ status: 200, description: 'Refund recorded successfully' })
+  @ApiResponse({ status: 400, description: 'Payment cannot be refunded' })
   async refundPayment(@Param('id') id: string) {
-    return this.paymentsService.refundPayment(id);
+    return this.paymentsService.recordRefund(id);
   }
 
   @Get('webhook-logs')
-  @ApiOperation({ summary: 'Retrieve raw Stripe and Jobber webhook events for auditing' })
+  @ApiOperation({ summary: 'Retrieve raw Jobber webhook events for auditing' })
   @ApiResponse({ status: 200, description: 'Audit logs returned' })
   async getWebhookLogs() {
     return this.prisma.webhookEvent.findMany({

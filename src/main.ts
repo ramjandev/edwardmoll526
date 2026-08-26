@@ -7,7 +7,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    // Crucial: Enables access to req.rawBody for Stripe webhook signature validation
+    // Crucial: Enables access to req.rawBody for Jobber webhook HMAC validation
     rawBody: true,
   });
 
@@ -32,7 +32,7 @@ async function bootstrap() {
   const config = new DocumentBuilder()
     .setTitle('Moving Company API')
     .setDescription(
-      'Senior-architected backend managing quotes (Google Sheets), bookings, Stripe payments (deposits & off-session card charges), and Jobber synchronization.',
+      'Backend managing quotes (Google Sheets), bookings, and Jobber synchronization. Card payments are collected by Jobber Payments through Client Hub invoice links.',
     )
     .setVersion('1.0')
     .addBearerAuth() // for Admin JWT operations

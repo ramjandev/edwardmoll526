@@ -3,7 +3,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateBookingDto } from './dto/booking.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { BookingStatus } from '../generated/prisma/client';
+import { JobberService } from '../jobber/jobber.service';
+import {
+  BookingStatus,
+  PaymentType,
+  PaymentMethod,
+} from '../generated/prisma/client';
 
 @Injectable()
 export class BookingsService {
@@ -14,11 +19,12 @@ export class BookingsService {
     private prisma: PrismaService,
     private paymentsService: PaymentsService,
     private notificationsService: NotificationsService,
+    private jobberService: JobberService,
   ) {}
 
   /**
-   * Reserves a pending slot for a move.
-   * Validates date capacity before booking.
+   * Reserves a pending slot for a move and raises the deposit invoice in Jobber.
+   * The date is only held once the customer pays that invoice.
    */
   async createBooking(dto: CreateBookingDto) {
     this.logger.log(`Reserving booking for Quote: ${dto.quoteId} on Date: ${dto.movingDate}`);
@@ -48,9 +54,20 @@ export class BookingsService {
           data: { customerId: existingCustomer.id },
         });
         (quote as any).customerId = existingCustomer.id;
-        quote.customer = existingCustomer;
+
+        const updatedCust = await this.prisma.customer.update({
+          where: { id: existingCustomer.id },
+          data: {
+            firstName: dto.firstName || existingCustomer.firstName,
+            lastName: dto.lastName || existingCustomer.lastName,
+            phone: dto.phone || existingCustomer.phone,
+            addressLine1: dto.addressLine1 || existingCustomer.addressLine1,
+            addressLine2: dto.addressLine2 || existingCustomer.addressLine2,
+            fcmToken: dto.fcmToken || existingCustomer.fcmToken,
+          },
+        });
+        quote.customer = updatedCust;
       } else {
-        // Update the current customer record
         const updatedCust = await this.prisma.customer.update({
           where: { id: quote.customerId },
           data: {
@@ -60,6 +77,7 @@ export class BookingsService {
             phone: dto.phone || quote.customer.phone,
             addressLine1: dto.addressLine1 || quote.customer.addressLine1,
             addressLine2: dto.addressLine2 || quote.customer.addressLine2,
+            fcmToken: dto.fcmToken || quote.customer.fcmToken,
           },
         });
         quote.customer = updatedCust;
@@ -117,7 +135,7 @@ export class BookingsService {
         quoteId: quote.id,
         customerId: quote.customerId,
         requestedDate,
-        status: BookingStatus.DEPOSIT_PENDING,
+        status: BookingStatus.QUOTED,
         depositAmount,
         balanceAmount,
         totalAmount,
@@ -128,6 +146,36 @@ export class BookingsService {
       },
     });
 
+    // 4. Raise the deposit invoice in Jobber and send the customer its payment link.
+    // A Jobber outage must not lose the booking, so failures are reported but not fatal.
+    let paymentUrl: string | null = null;
+    let invoiceError: string | null = null;
+
+    try {
+      const depositLink = await this.paymentsService.createDepositInvoice(booking.id);
+      paymentUrl = depositLink.paymentUrl;
+
+      await this.notificationsService.sendPaymentRequest(
+        booking.id,
+        booking.customerId,
+        `${booking.customer.firstName} ${booking.customer.lastName}`,
+        depositLink.amount,
+        'DEPOSIT',
+        depositLink.paymentUrl,
+        booking.requestedDate,
+      );
+    } catch (error: any) {
+      invoiceError = error.message;
+      this.logger.error(
+        `Deposit invoice could not be created for booking ${booking.id}`,
+        error.stack,
+      );
+    }
+
+    const finalBooking = await this.prisma.booking.findUnique({
+      where: { id: booking.id },
+    });
+
     return {
       bookingId: booking.id,
       customer: booking.customer,
@@ -135,25 +183,121 @@ export class BookingsService {
       totalAmount: Number(booking.totalAmount),
       depositAmount: Number(booking.depositAmount),
       balanceAmount: Number(booking.balanceAmount),
-      status: booking.status,
+      status: finalBooking?.status ?? booking.status,
+      paymentUrl,
+      invoiceError,
     };
   }
 
   /**
-   * Finalizes the moving lifecycle:
-   * Charges the remaining balance off-session on the saved payment method,
-   * updates the booking status, and sends confirmation receipts.
+   * Runs after Jobber confirms the deposit invoice was paid.
+   * Schedules the job in Jobber and confirms the date with the customer.
    */
-  async completeJobAndCollectBalance(jobberJobId: string) {
-    this.logger.log(`Received job completed event from Jobber for Job ID: ${jobberJobId}`);
-
-    const booking = await this.prisma.booking.findFirst({
-      where: { jobberJobId },
-      include: { customer: true, quote: true, payments: true },
+  async handleDepositPaid(bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { customer: true, quote: true },
     });
 
     if (!booking) {
-      this.logger.error(`No Booking record found matching Jobber Job ID: ${jobberJobId}`);
+      throw new NotFoundException(`Booking with ID ${bookingId} not found`);
+    }
+
+    if (booking.jobberJobId) {
+      this.logger.warn(`Booking ${bookingId} already has Jobber job ${booking.jobberJobId}. Skipping.`);
+      return { status: 'ALREADY_SCHEDULED', jobberJobId: booking.jobberJobId };
+    }
+
+    const customerName = `${booking.customer.firstName} ${booking.customer.lastName}`;
+
+    let jobberCustomerId = booking.customer.jobberCustomerId;
+    if (!jobberCustomerId) {
+      const address = [booking.customer.addressLine1, booking.customer.addressLine2]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      jobberCustomerId = await this.jobberService.syncCustomer(
+        customerName,
+        booking.customer.email,
+        booking.customer.phone,
+        address || null,
+      );
+
+      await this.prisma.customer.update({
+        where: { id: booking.customerId },
+        data: { jobberCustomerId },
+      });
+    }
+
+    const jobDetails = [
+      'Move details:',
+      `- Client: ${customerName}`,
+      `- Phone: ${booking.customer.phone}`,
+      `- Moving Date: ${booking.requestedDate.toLocaleDateString()}`,
+      `- Quoted Cost: $${Number(booking.quote.estimatedTotal).toFixed(2)}`,
+      `- Deposit Paid: $${Number(booking.depositAmount).toFixed(2)}`,
+      `- Balance Due: $${Number(booking.balanceAmount).toFixed(2)}`,
+      `- Inputs: ${JSON.stringify(booking.quote.rawInputs)}`,
+    ].join('\n');
+
+    const jobberJobId = await this.jobberService.createJob(
+      jobberCustomerId,
+      `Phoenix Move - ${customerName}`,
+      booking.requestedDate,
+      jobDetails,
+    );
+
+    await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.SCHEDULED,
+        jobberJobId,
+        confirmedDate: booking.requestedDate,
+      },
+    });
+
+    await this.notificationsService.sendBookingConfirmation(
+      booking.id,
+      booking.customerId,
+      booking.customer.email,
+      customerName,
+      booking.requestedDate,
+      Number(booking.totalAmount),
+      Number(booking.depositAmount),
+    );
+
+    await this.notificationsService.sendSmsConfirmation(
+      booking.id,
+      booking.customerId,
+      booking.customer.phone,
+      `Hi ${booking.customer.firstName}, your move is confirmed for ${booking.requestedDate.toLocaleDateString()}. Deposit received. Balance of $${Number(booking.balanceAmount).toFixed(2)} is due after the move.`,
+    );
+
+    await this.notificationsService.sendPushConfirmation(
+      booking.id,
+      booking.customerId,
+      'Move Scheduled',
+      `Your move is reserved for ${booking.requestedDate.toLocaleDateString()}. Deposit received.`,
+    );
+
+    this.logger.log(`Booking ${bookingId} scheduled in Jobber as job ${jobberJobId}`);
+    return { status: 'SCHEDULED', jobberJobId };
+  }
+
+  /**
+   * Runs after Jobber reports the job finished.
+   * Raises the balance invoice and sends the customer its payment link.
+   */
+  async handleJobCompleted(jobberJobId: string) {
+    this.logger.log(`Jobber reported job ${jobberJobId} completed`);
+
+    const booking = await this.prisma.booking.findFirst({
+      where: { jobberJobId },
+      include: { customer: true, quote: true },
+    });
+
+    if (!booking) {
       throw new NotFoundException(`Booking matching job ID ${jobberJobId} not found`);
     }
 
@@ -162,62 +306,54 @@ export class BookingsService {
       return { status: 'ALREADY_PAID' };
     }
 
-    // Mark job as completed in database
     await this.prisma.booking.update({
       where: { id: booking.id },
       data: { status: BookingStatus.COMPLETED },
     });
 
-    try {
-      // 1. Charge the remaining balance off-session
-      const stripeIntentId = await this.paymentsService.chargeRemainingBalance(booking.id);
+    const balanceLink = await this.paymentsService.createBalanceInvoice(booking.id);
 
-      // Find the successful balance payment we just created
-      const balancePayment = await this.prisma.payment.findUnique({
-        where: { stripePaymentIntentId: stripeIntentId },
-      });
+    await this.notificationsService.sendPaymentRequest(
+      booking.id,
+      booking.customerId,
+      `${booking.customer.firstName} ${booking.customer.lastName}`,
+      balanceLink.amount,
+      'BALANCE',
+      balanceLink.paymentUrl,
+      booking.requestedDate,
+    );
 
-      const chargedAmount = balancePayment ? Number(balancePayment.amount) : Number(booking.balanceAmount);
+    this.logger.log(`Balance invoice ${balanceLink.invoiceId} issued for booking ${booking.id}`);
 
-      // 2. Send receipt notifications
-      await this.notificationsService.sendPaymentReceipt(
-        booking.id,
-        booking.customer.id,
-        booking.customer.email,
-        `${booking.customer.firstName} ${booking.customer.lastName}`,
-        chargedAmount,
-        'BALANCE',
-        stripeIntentId,
-      );
+    return {
+      status: 'BALANCE_INVOICED',
+      invoiceId: balanceLink.invoiceId,
+      paymentUrl: balanceLink.paymentUrl,
+    };
+  }
 
-      await this.notificationsService.sendSmsConfirmation(
-        booking.id,
-        booking.customer.id,
-        booking.customer.phone,
-        `Hi ${booking.customer.firstName}, your move is complete! The remaining balance of $${chargedAmount.toFixed(2)} has been successfully charged. Thank you for choosing us!`,
-      );
+  /**
+   * Sends the receipt after Jobber confirms an invoice was paid.
+   */
+  async sendPaidReceipt(bookingId: string, type: PaymentType, amount: number, reference: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { customer: true },
+    });
 
-      this.logger.log(`Remaining balance collected successfully for Booking: ${booking.id}`);
-      return { status: 'SUCCESS', transactionId: stripeIntentId };
-    } catch (chargeError: any) {
-      this.logger.error(`Off-session balance collection failed for Booking: ${booking.id}`, chargeError.stack);
+    if (!booking) return;
 
-      // Mark the booking as BALANCE_PENDING to indicate they still owe the final payment
-      await this.prisma.booking.update({
-        where: { id: booking.id },
-        data: { status: BookingStatus.BALANCE_PENDING },
-      });
+    const customerName = `${booking.customer.firstName} ${booking.customer.lastName}`;
 
-      // Send alert SMS/email about the failed payment
-      await this.notificationsService.sendSmsConfirmation(
-        booking.id,
-        booking.customer.id,
-        booking.customer.phone,
-        `Hi ${booking.customer.firstName}, we encountered an issue processing the remaining balance of your move. Please contact our support office to complete your payment.`,
-      );
-
-      return { status: 'CHARGE_FAILED', error: chargeError.message };
-    }
+    await this.notificationsService.sendPaymentReceipt(
+      booking.id,
+      booking.customerId,
+      booking.customer.email,
+      customerName,
+      amount,
+      type === PaymentType.DEPOSIT ? 'DEPOSIT' : 'BALANCE',
+      reference,
+    );
   }
 
   /**
@@ -234,5 +370,68 @@ export class BookingsService {
         requestedDate: 'desc',
       },
     });
+  }
+
+  /**
+   * Marks a move complete and records the balance as collected in person.
+   */
+  async completeOffline(bookingId: string, method: PaymentMethod = PaymentMethod.CASH) {
+    this.logger.log(`Marking booking ${bookingId} complete with an offline payment`);
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { customer: true, quote: true },
+    });
+
+    if (!booking) {
+      throw new NotFoundException(`Booking with ID ${bookingId} not found`);
+    }
+
+    if (booking.status === BookingStatus.BALANCE_PAID) {
+      return { message: 'Booking is already complete', booking };
+    }
+
+    await this.paymentsService.recordOfflinePayment(
+      bookingId,
+      PaymentType.BALANCE,
+      method,
+    );
+
+    const updatedBooking = await this.prisma.booking.update({
+      where: { id: bookingId },
+      data: { status: BookingStatus.BALANCE_PAID },
+    });
+
+    const customerName = `${booking.customer.firstName} ${booking.customer.lastName}`;
+    const balance = Number(booking.balanceAmount);
+
+    await this.notificationsService.sendPaymentReceipt(
+      booking.id,
+      booking.customerId,
+      booking.customer.email,
+      customerName,
+      balance,
+      'BALANCE',
+      `Collected offline (${method})`,
+    );
+
+    await this.notificationsService.sendSmsConfirmation(
+      booking.id,
+      booking.customerId,
+      booking.customer.phone,
+      `Hi ${booking.customer.firstName}, your move is complete. The balance of $${balance.toFixed(2)} was received. Thank you!`,
+    );
+
+    await this.notificationsService.sendPushConfirmation(
+      booking.id,
+      booking.customerId,
+      'Move Completed',
+      `Balance of $${balance.toFixed(2)} received. Thank you!`,
+    );
+
+    return {
+      message: 'Booking successfully marked complete offline',
+      booking: updatedBooking,
+    };
   }
 }

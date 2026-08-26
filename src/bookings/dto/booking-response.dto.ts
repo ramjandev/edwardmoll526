@@ -54,6 +54,20 @@ export class BookingResponseDto {
 
   @ApiProperty({ enum: BookingStatus, example: BookingStatus.DEPOSIT_PENDING })
   status!: BookingStatus;
+
+  @ApiProperty({
+    example: 'https://clienthub.getjobber.com/client_hubs/abc/invoices/999999',
+    description: 'Jobber Client Hub link where the customer pays the deposit',
+    nullable: true,
+  })
+  paymentUrl!: string | null;
+
+  @ApiProperty({
+    example: null,
+    description: 'Set when the Jobber deposit invoice could not be created',
+    nullable: true,
+  })
+  invoiceError!: string | null;
 }
 
 export class BookingResponseWrapperDto {

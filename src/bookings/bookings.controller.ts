@@ -1,15 +1,29 @@
-import { Controller, Post, Get, Body, Req, Headers, BadRequestException, Logger, RawBodyRequest, UseGuards, Param } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Req,
+  Headers,
+  BadRequestException,
+  UnauthorizedException,
+  Logger,
+  UseGuards,
+  Param,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/booking.dto';
-import { BookingResponseDto, BookingResponseWrapperDto, BookingListResponseWrapperDto } from './dto/booking-response.dto';
+import { BookingResponseWrapperDto, BookingListResponseWrapperDto } from './dto/booking-response.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { JobberService } from '../jobber/jobber.service';
-import { NotificationsService } from '../notifications/notifications.service';
-import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { BookingStatus, WebhookSource, PaymentType, PaymentStatus } from '../generated/prisma/client';
+import { WebhookSource, PaymentType } from '../generated/prisma/client';
+
+/** Jobber topics this backend reacts to. Everything else is logged and ignored. */
+const INVOICE_TOPICS = ['INVOICE_UPDATE', 'INVOICE_CREATE'];
+const JOB_DONE_TOPICS = ['JOB_CLOSED', 'VISIT_COMPLETE', 'JOB_COMPLETED'];
 
 @ApiTags('Bookings & Scheduling')
 @Controller('bookings')
@@ -20,137 +34,19 @@ export class BookingsController {
     private readonly bookingsService: BookingsService,
     private readonly paymentsService: PaymentsService,
     private readonly jobberService: JobberService,
-    private readonly notificationsService: NotificationsService,
-    private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Reserve a moving date (Pending deposit)' })
-  @ApiResponse({ status: 201, description: 'Pending booking created successfully', type: BookingResponseWrapperDto })
+  @ApiOperation({ summary: 'Reserve a moving date and issue the Jobber deposit invoice' })
+  @ApiResponse({
+    status: 201,
+    description: 'Booking created. Response contains the Jobber payment link.',
+    type: BookingResponseWrapperDto,
+  })
   @ApiResponse({ status: 400, description: 'Validation failed or date is fully booked' })
   async createBooking(@Body() dto: CreateBookingDto) {
     return this.bookingsService.createBooking(dto);
-  }
-
-  @Post(':id/mock-pay-success')
-  @ApiOperation({ summary: 'MOCK ONLY: Simulate a successful Stripe deposit payment and trigger Jobber scheduling' })
-  @ApiResponse({ status: 200, description: 'Booking successfully paid and scheduled' })
-  async mockPaySuccess(@Param('id') bookingId: string) {
-    this.logger.log(`[MOCK PAY SUCCESS] Triggered manually for Booking ${bookingId}`);
-
-    const booking = await this.prisma.booking.findUnique({
-      where: { id: bookingId },
-      include: { customer: true, quote: true },
-    });
-
-    if (!booking) {
-      throw new BadRequestException(`Booking ${bookingId} not found`);
-    }
-
-    if (booking.status !== BookingStatus.DEPOSIT_PENDING) {
-      throw new BadRequestException(`Booking ${bookingId} is not in DEPOSIT_PENDING status (current: ${booking.status})`);
-    }
-
-    const mockPaymentIntentId = `pi_mock_manual_${Math.floor(Math.random() * 1000000)}`;
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.booking.update({
-        where: { id: bookingId },
-        data: {
-          status: BookingStatus.DEPOSIT_PAID,
-          stripePaymentMethodId: 'pm_mock_manual_card_123',
-        },
-      });
-
-      await tx.payment.create({
-        data: {
-          bookingId,
-          type: PaymentType.DEPOSIT,
-          status: PaymentStatus.SUCCEEDED,
-          amount: Number(booking.depositAmount),
-          stripePaymentIntentId: mockPaymentIntentId,
-          paidAt: new Date(),
-        },
-      });
-    });
-
-    // Run Jobber Sync Flow (just like Stripe Webhook)
-    const customerName = `${booking.customer.firstName} ${booking.customer.lastName}`;
-    const email = booking.customer.email;
-    const phone = booking.customer.phone;
-    const address = booking.customer.addressLine1 || 'Phoenix, AZ';
-
-    // Sync Customer to Jobber
-    const jobberCustomerId = await this.jobberService.syncCustomer(
-      customerName,
-      email,
-      phone,
-      address,
-    );
-
-    await this.prisma.customer.update({
-      where: { id: booking.customerId },
-      data: { jobberCustomerId },
-    });
-
-    // Sync moving Job to Jobber
-    const jobDescription = `
-      Move details:
-      - Client: ${customerName}
-      - Phone: ${phone}
-      - Moving Date: ${booking.requestedDate.toLocaleDateString()}
-      - Quoted Cost: $${Number(booking.quote.estimatedTotal).toFixed(2)}
-      - Inputs: ${JSON.stringify(booking.quote.rawInputs)}
-    `.trim();
-
-    const jobberJobId = await this.jobberService.createJob(
-      jobberCustomerId,
-      `Phoenix Move - ${customerName}`,
-      booking.requestedDate,
-      jobDescription,
-    );
-
-    // Update booking to SCHEDULED
-    const updatedBooking = await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        status: BookingStatus.SCHEDULED,
-        jobberJobId,
-      },
-      include: { customer: true, quote: true },
-    });
-
-    // Send notifications
-    await this.notificationsService.sendBookingConfirmation(
-      bookingId,
-      booking.customerId,
-      email,
-      customerName,
-      booking.requestedDate,
-      Number(booking.totalAmount),
-      Number(booking.depositAmount),
-    );
-
-    // Send FCM Push alert
-    await this.notificationsService.sendPushConfirmation(
-      bookingId,
-      booking.customerId,
-      'Phoenix Move Scheduled! 🚚',
-      `Hi ${booking.customer.firstName || 'Customer'}, your move is reserved for ${booking.requestedDate.toLocaleDateString()}. Deposit paid successfully.`,
-    );
-
-    this.logger.log(`[MOCK PAY SUCCESS] Completed successfully for Booking ${bookingId}. Scheduled in Jobber as Job ID: ${jobberJobId}`);
-
-    return {
-      message: 'Booking successfully paid and scheduled (Mock Mode)',
-      booking: {
-        id: updatedBooking.id,
-        status: updatedBooking.status,
-        jobberJobId: updatedBooking.jobberJobId,
-        paymentIntentId: mockPaymentIntentId,
-      },
-    };
   }
 
   @Get()
@@ -162,291 +58,166 @@ export class BookingsController {
     return this.bookingsService.getBookings();
   }
 
-  @Post('stripe-webhook')
-  @ApiOperation({ summary: 'Stripe Webhook listener (manages deposit success)' })
-  @ApiResponse({ status: 200, description: 'Stripe webhook event processed' })
-  async handleStripeWebhook(
-    @Req() req: any,
-    @Headers('stripe-signature') signature: string,
-  ) {
-    const webhookSecret = this.configService.get<string>('STRIPE_WEBHOOK_SECRET');
-    const rawBody = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-
-    this.logger.log('Ingesting Stripe Webhook...');
-
-    let event: any;
-    try {
-      if (signature && webhookSecret && !webhookSecret.includes('mock')) {
-        event = this.paymentsService.constructWebhookEvent(rawBody, signature, webhookSecret);
-      } else {
-        this.logger.warn('Skipping Stripe webhook signature verification (mock mode)');
-        event = req.body;
-      }
-    } catch (err: any) {
-      this.logger.error(`Stripe signature verification failed: ${err.message}`);
-      throw new BadRequestException(`Stripe Webhook Error: ${err.message}`);
-    }
-
-    const eventId = event.id || `evt_mock_${Date.now()}`;
-    const eventType = event.type || 'payment_intent.succeeded';
-
-    // 1. Webhook Idempotency Check: Prevent duplicate processing of the same Stripe event ID
-    const existingWebhook = await this.prisma.webhookEvent.findUnique({
-      where: {
-        source_externalId: {
-          source: WebhookSource.STRIPE,
-          externalId: eventId,
-        },
-      },
-    });
-
-    if (existingWebhook) {
-      this.logger.warn(`Stripe Event ID: ${eventId} has already been processed. Skipping duplicates.`);
-      return { received: true, duplicate: true };
-    }
-
-    // 2. Create the WebhookEvent audit record
-    const webhookLog = await this.prisma.webhookEvent.create({
-      data: {
-        source: WebhookSource.STRIPE,
-        eventType,
-        externalId: eventId,
-        payload: event as any,
-        processed: false,
-      },
-    });
-
-    if (eventType === 'payment_intent.succeeded') {
-      const intent = event.data.object;
-      const bookingId = intent.metadata?.bookingId;
-
-      if (!bookingId) {
-        this.logger.warn(`Stripe payment_intent.succeeded had no bookingId in metadata. Event ID: ${eventId}`);
-        await this.prisma.webhookEvent.update({
-          where: { id: webhookLog.id },
-          data: { processed: true, processingError: 'No bookingId in metadata' },
-        });
-        return { received: true };
-      }
-
-      const paymentMethodId = intent.payment_method;
-
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          // Check if payment already recorded
-          const existingPayment = await tx.payment.findUnique({
-            where: { stripePaymentIntentId: intent.id },
-          });
-
-          if (existingPayment) {
-            await tx.payment.update({
-              where: { id: existingPayment.id },
-              data: {
-                status: PaymentStatus.SUCCEEDED,
-                paidAt: new Date(),
-              },
-            });
-          } else {
-            await tx.payment.create({
-              data: {
-                bookingId,
-                type: PaymentType.DEPOSIT,
-                status: PaymentStatus.SUCCEEDED,
-                amount: intent.amount / 100,
-                stripePaymentIntentId: intent.id,
-                paidAt: new Date(),
-              },
-            });
-          }
-
-          // Update Booking Status
-          await tx.booking.update({
-            where: { id: bookingId },
-            data: {
-              status: BookingStatus.DEPOSIT_PAID,
-              stripePaymentMethodId: paymentMethodId,
-            },
-          });
-        });
-
-        // Retrieve full booking information for Jobber creation and notification triggers
-        const booking = await this.prisma.booking.findUnique({
-          where: { id: bookingId },
-          include: { customer: true, quote: true },
-        });
-
-        if (booking) {
-          // Sync customer to Jobber
-          let jobberCustomerId = booking.customer.jobberCustomerId;
-          if (!jobberCustomerId) {
-            jobberCustomerId = await this.jobberService.syncCustomer(
-              `${booking.customer.firstName} ${booking.customer.lastName}`,
-              booking.customer.email,
-              booking.customer.phone,
-              `${booking.customer.addressLine1 || ''} ${booking.customer.addressLine2 || ''}`.trim(),
-            );
-
-            await this.prisma.customer.update({
-              where: { id: booking.customer.id },
-              data: { jobberCustomerId },
-            });
-          }
-
-          // Create moving job in Jobber
-          const jobDetails = `
-            Move details:
-            - Client: ${booking.customer.firstName} ${booking.customer.lastName}
-            - Phone: ${booking.customer.phone}
-            - Moving Date: ${booking.requestedDate.toLocaleDateString()}
-            - Quoted Cost: $${Number(booking.quote.estimatedTotal).toFixed(2)}
-            - Inputs: ${JSON.stringify(booking.quote.rawInputs)}
-          `;
-
-          const jobberJobId = await this.jobberService.createJob(
-            jobberCustomerId,
-            `Phoenix Move - ${booking.customer.firstName} ${booking.customer.lastName}`,
-            booking.requestedDate,
-            jobDetails,
-          );
-
-          await this.prisma.booking.update({
-            where: { id: bookingId },
-            data: {
-              jobberJobId,
-              status: BookingStatus.SCHEDULED,
-            },
-          });
-
-          // Trigger email receipts and text messages
-          const depositPaid = Number(booking.depositAmount);
-
-          await this.notificationsService.sendBookingConfirmation(
-            booking.id,
-            booking.customer.id,
-            booking.customer.email,
-            `${booking.customer.firstName} ${booking.customer.lastName}`,
-            booking.requestedDate,
-            Number(booking.quote.estimatedTotal),
-            depositPaid,
-          );
-
-          await this.notificationsService.sendPaymentReceipt(
-            booking.id,
-            booking.customer.id,
-            booking.customer.email,
-            `${booking.customer.firstName} ${booking.customer.lastName}`,
-            depositPaid,
-            'DEPOSIT',
-            intent.id,
-          );
-
-          await this.notificationsService.sendSmsConfirmation(
-            booking.id,
-            booking.customer.id,
-            booking.customer.phone,
-            `Hi ${booking.customer.firstName}, your move is scheduled for ${booking.requestedDate.toLocaleDateString()}. Deposit paid: $${depositPaid}. Thanks!`,
-          );
-
-          // Send FCM Push alert
-          await this.notificationsService.sendPushConfirmation(
-            booking.id,
-            booking.customer.id,
-            'Phoenix Move Scheduled! 🚚',
-            `Hi ${booking.customer.firstName || 'Customer'}, your move is reserved for ${booking.requestedDate.toLocaleDateString()}. Deposit paid successfully.`,
-          );
-        }
-
-        // Mark webhook event as processed
-        await this.prisma.webhookEvent.update({
-          where: { id: webhookLog.id },
-          data: { processed: true, processedAt: new Date() },
-        });
-
-      } catch (err: any) {
-        this.logger.error(`Stripe Webhook processor error for Booking: ${bookingId}`, err.stack);
-        await this.prisma.webhookEvent.update({
-          where: { id: webhookLog.id },
-          data: { processed: false, processingError: err.message },
-        });
-      }
-    }
-
-    return { received: true };
-  }
-
   @Post('jobber-webhook')
-  @ApiOperation({ summary: 'Jobber Webhook listener (manages job completions)' })
+  @ApiOperation({
+    summary: 'Jobber webhook listener (invoice payments and job completion)',
+  })
   @ApiBody({
     schema: {
       type: 'object',
-      properties: {
-        topic: { type: 'string', example: 'JOB_COMPLETED' },
-        resourceId: { type: 'string', example: 'jobber_job_mock_4726' },
+      example: {
+        data: {
+          webHookEvent: {
+            topic: 'INVOICE_UPDATE',
+            accountId: 'MQ==',
+            itemId: 'Z2lkOi8vSm9iYmVyL0ludm9pY2UvOTk5OTk5',
+            occurredAt: '2026-03-19T16:31:36-06:00',
+          },
+        },
       },
-      required: ['topic', 'resourceId'],
     },
   })
   @ApiResponse({ status: 200, description: 'Jobber webhook event processed' })
-  async handleJobberWebhook(@Body() payload: any) {
-    this.logger.log(`Ingesting Jobber Webhook: ${JSON.stringify(payload)}`);
+  async handleJobberWebhook(
+    @Req() req: any,
+    @Headers('x-jobber-hmac-sha256') signature: string,
+    @Body() payload: any,
+  ) {
+    const rawBody = req.rawBody ? req.rawBody.toString() : JSON.stringify(payload);
 
-    const topic = payload.topic || payload.event || '';
-    const resourceId = payload.resourceId || payload.data?.id || '';
-    const eventId = payload.id || `evt_jobber_${Date.now()}`;
+    if (!this.jobberService.verifyWebhookSignature(rawBody, signature)) {
+      this.logger.error('Rejected Jobber webhook: invalid HMAC signature');
+      throw new UnauthorizedException('Invalid Jobber webhook signature');
+    }
 
-    // 1. Idempotency Check: Prevent duplicate processing of the same Jobber event
+    // Real Jobber deliveries nest the event; the flat shape is kept for manual testing.
+    const event = payload?.data?.webHookEvent ?? {};
+    const topic: string = event.topic || payload?.topic || '';
+    const itemId: string = event.itemId || payload?.resourceId || '';
+    const occurredAt: string = event.occurredAt || new Date().toISOString();
+
+    if (!topic || !itemId) {
+      throw new BadRequestException('Webhook payload is missing topic or itemId');
+    }
+
+    this.logger.log(`Ingesting Jobber webhook ${topic} for ${itemId}`);
+
+    // Jobber fires the same topic more than once per user action, so the
+    // event identity has to include when it happened.
+    const externalId = `${topic}:${itemId}:${occurredAt}`;
+
     const existingWebhook = await this.prisma.webhookEvent.findUnique({
       where: {
         source_externalId: {
           source: WebhookSource.JOBBER,
-          externalId: eventId,
+          externalId,
         },
       },
     });
 
     if (existingWebhook) {
-      this.logger.warn(`Jobber Event ID ${eventId} already processed. Skipping.`);
+      this.logger.warn(`Jobber event ${externalId} already processed. Skipping.`);
       return { received: true, duplicate: true };
     }
 
-    // 2. Create Audit log
     const webhookLog = await this.prisma.webhookEvent.create({
       data: {
         source: WebhookSource.JOBBER,
         eventType: topic,
-        externalId: eventId,
+        externalId,
         payload,
         processed: false,
       },
     });
 
-    // If job completion signal
-    if (topic === 'JOB_COMPLETED' || topic === 'job_complete' || topic === 'job.complete') {
-      try {
-        const result = await this.bookingsService.completeJobAndCollectBalance(resourceId);
-        
-        await this.prisma.webhookEvent.update({
-          where: { id: webhookLog.id },
-          data: {
-            processed: true,
-            processedAt: new Date(),
-          },
-        });
+    try {
+      let result: any = { ignored: true };
 
-        return { processed: true, result };
-      } catch (error: any) {
-        this.logger.error(`Failed to process Jobber webhook for Job ID: ${resourceId}`, error.stack);
-        await this.prisma.webhookEvent.update({
-          where: { id: webhookLog.id },
-          data: {
-            processed: false,
-            processingError: error.message,
-          },
-        });
-        return { processed: false, error: error.message };
+      if (INVOICE_TOPICS.includes(topic)) {
+        result = await this.processInvoiceEvent(itemId);
+      } else if (JOB_DONE_TOPICS.includes(topic)) {
+        result = await this.bookingsService.handleJobCompleted(itemId);
+      } else {
+        this.logger.log(`No handler for Jobber topic ${topic}. Recorded only.`);
       }
+
+      await this.prisma.webhookEvent.update({
+        where: { id: webhookLog.id },
+        data: { processed: true, processedAt: new Date() },
+      });
+
+      return { received: true, topic, result };
+    } catch (error: any) {
+      this.logger.error(`Failed to process Jobber webhook ${externalId}`, error.stack);
+
+      await this.prisma.webhookEvent.update({
+        where: { id: webhookLog.id },
+        data: { processed: false, processingError: error.message },
+      });
+
+      return { received: true, processed: false, error: error.message };
+    }
+  }
+
+  /**
+   * An invoice changed in Jobber. Settle it locally, and if it was the deposit,
+   * schedule the job now that the date is actually paid for.
+   */
+  private async processInvoiceEvent(invoiceId: string) {
+    const settled = await this.paymentsService.settleInvoiceIfPaid(invoiceId);
+
+    if (!settled) {
+      return { paid: false };
     }
 
-    return { received: true };
+    const { payment, type } = settled;
+
+    await this.bookingsService.sendPaidReceipt(
+      payment.bookingId,
+      type,
+      Number(payment.amount),
+      payment.jobberInvoiceNumber || invoiceId,
+    );
+
+    if (type === PaymentType.DEPOSIT) {
+      const scheduled = await this.bookingsService.handleDepositPaid(payment.bookingId);
+      return { paid: true, type, ...scheduled };
+    }
+
+    return { paid: true, type };
+  }
+
+  @Post(':id/complete-offline')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Mark booking complete and log an offline payment (cash/check)' })
+  @ApiResponse({ status: 200, description: 'Booking successfully marked complete offline', type: BookingResponseWrapperDto })
+  async completeOffline(@Param('id') bookingId: string) {
+    return this.bookingsService.completeOffline(bookingId);
+  }
+
+  @Post(':id/simulate-deposit-paid')
+  @ApiOperation({
+    summary: 'DEV ONLY: simulate Jobber confirming the deposit invoice was paid',
+  })
+  @ApiResponse({ status: 200, description: 'Deposit marked paid and job scheduled in Jobber' })
+  async simulateDepositPaid(@Param('id') bookingId: string) {
+    if (!this.jobberService.mockMode) {
+      throw new BadRequestException(
+        'Simulation is disabled when real Jobber credentials are configured.',
+      );
+    }
+
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+
+    if (!booking?.depositInvoiceId) {
+      throw new BadRequestException(
+        `Booking ${bookingId} has no deposit invoice to settle.`,
+      );
+    }
+
+    return this.processInvoiceEvent(booking.depositInvoiceId);
   }
 }

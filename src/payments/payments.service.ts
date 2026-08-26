@@ -1,242 +1,312 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
-import Stripe from 'stripe';
-import { PaymentType, PaymentStatus, BookingStatus } from '../generated/prisma/client';
+import { JobberService } from '../jobber/jobber.service';
+import {
+  PaymentType,
+  PaymentStatus,
+  PaymentMethod,
+  BookingStatus,
+} from '../generated/prisma/client';
 
+export interface PaymentLink {
+  paymentId: string;
+  invoiceId: string;
+  invoiceNumber: string | null;
+  paymentUrl: string | null;
+  amount: number;
+  currency: string;
+  type: PaymentType;
+  status: PaymentStatus;
+}
+
+/**
+ * Card processing is handled entirely by Jobber Payments. This service never
+ * touches card data: it creates Jobber invoices and hands the customer the
+ * Client Hub link where Jobber collects the money.
+ */
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
-  private stripe: Stripe | null = null;
-  private isMock = true;
 
   constructor(
     private prisma: PrismaService,
-    configService: ConfigService,
-  ) {
-    const stripeKey = configService.get<string>('STRIPE_SECRET_KEY');
+    private jobber: JobberService,
+  ) {}
 
-    if (stripeKey && !stripeKey.includes('mock')) {
-      this.stripe = new Stripe(stripeKey, {
-        apiVersion: '2025-01-27.acacia' as any, // Use stable Stripe version
-      });
-      this.isMock = false;
-      this.logger.log('Stripe SDK initialized successfully.');
-    } else {
-      this.logger.warn('Using Stripe Mock processor (no Stripe API secret key provided).');
+  /**
+   * Makes sure the customer exists in Jobber, creating them on first use.
+   */
+  private async ensureJobberCustomer(customerId: string): Promise<string> {
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+    });
+
+    if (!customer) {
+      throw new NotFoundException(`Customer ${customerId} not found`);
     }
+
+    if (customer.jobberCustomerId) {
+      return customer.jobberCustomerId;
+    }
+
+    const address = [customer.addressLine1, customer.addressLine2]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    const jobberCustomerId = await this.jobber.syncCustomer(
+      `${customer.firstName} ${customer.lastName}`,
+      customer.email,
+      customer.phone,
+      address || null,
+    );
+
+    await this.prisma.customer.update({
+      where: { id: customer.id },
+      data: { jobberCustomerId },
+    });
+
+    return jobberCustomerId;
   }
 
   /**
-   * Creates a Stripe PaymentIntent for the booking deposit (30%).
-   * Automatically configures it to save the card for off-session charges (remaining 70%).
+   * Creates the deposit invoice in Jobber and returns the Client Hub payment link.
+   * Safe to call twice — an existing unpaid deposit invoice is returned as is.
    */
-  async createDepositIntent(bookingId: string): Promise<{
-    paymentIntentId: string;
-    clientSecret: string | null;
-    amount: number;
-    currency: string;
-  }> {
+  async createDepositInvoice(bookingId: string): Promise<PaymentLink> {
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
-      include: {
-        quote: true,
-        customer: true,
-      },
+      include: { customer: true, quote: true },
     });
 
     if (!booking) {
       throw new NotFoundException(`Booking with ID ${bookingId} not found`);
     }
 
+    const existing = await this.prisma.payment.findFirst({
+      where: { bookingId, type: PaymentType.DEPOSIT },
+    });
+
+    if (existing?.status === PaymentStatus.SUCCEEDED) {
+      throw new BadRequestException('The deposit for this booking is already paid.');
+    }
+
+    if (existing?.jobberInvoiceId) {
+      this.logger.log(`Reusing existing deposit invoice for booking ${bookingId}`);
+      return this.toPaymentLink(existing);
+    }
+
+    const jobberCustomerId = await this.ensureJobberCustomer(booking.customerId);
     const depositAmount = Number(booking.depositAmount);
-    this.logger.log(`Creating deposit intent for Booking: ${bookingId}. Amount: $${depositAmount}`);
+    const movingDate = booking.requestedDate.toLocaleDateString();
 
-    if (this.isMock) {
-      const mockIntentId = `pi_mock_${Math.floor(Math.random() * 1000000)}`;
-      
-      // Upsert a pending payment record in our database
-      await this.prisma.payment.upsert({
-        where: { stripePaymentIntentId: mockIntentId },
-        update: { amount: depositAmount },
-        create: {
-          bookingId: booking.id,
-          stripePaymentIntentId: mockIntentId,
-          amount: depositAmount,
-          type: PaymentType.DEPOSIT,
-          status: PaymentStatus.PROCESSING,
-        },
-      });
+    const invoice = await this.jobber.createInvoice(
+      jobberCustomerId,
+      `Moving deposit - ${movingDate}`,
+      `Deposit for move on ${movingDate}`,
+      depositAmount,
+      `Deposit to reserve your moving date of ${movingDate}. Your remaining balance of $${Number(booking.balanceAmount).toFixed(2)} is invoiced after the move is complete.`,
+    );
 
-      return {
-        paymentIntentId: mockIntentId,
-        clientSecret: `pi_mock_client_secret_${mockIntentId}`,
+    const payment = await this.prisma.payment.create({
+      data: {
+        bookingId: booking.id,
+        type: PaymentType.DEPOSIT,
+        status: PaymentStatus.AWAITING_PAYMENT,
+        method: PaymentMethod.JOBBER_ONLINE,
         amount: depositAmount,
-        currency: 'usd',
-      };
-    }
+        jobberInvoiceId: invoice.id,
+        jobberInvoiceNumber: invoice.invoiceNumber,
+        clientHubUri: invoice.clientHubUri,
+      },
+    });
 
-    try {
-      // Create Stripe PaymentIntent
-      const intent = await this.stripe!.paymentIntents.create({
-        amount: Math.round(depositAmount * 100), // cents
-        currency: 'usd',
-        metadata: { bookingId: booking.id },
-        setup_future_usage: 'off_session', // critical: allows us to charge remaining balance later
-        receipt_email: booking.customer.email,
-        description: `Phoenix Moving: Deposit for booking on ${booking.requestedDate.toLocaleDateString()}`,
-      });
+    await this.prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: BookingStatus.DEPOSIT_PENDING,
+        depositInvoiceId: invoice.id,
+        depositInvoiceUrl: invoice.clientHubUri,
+      },
+    });
 
-      // Save pending payment record
-      await this.prisma.payment.create({
-        data: {
-          bookingId: booking.id,
-          stripePaymentIntentId: intent.id,
-          amount: depositAmount,
-          type: PaymentType.DEPOSIT,
-          status: PaymentStatus.REQUIRES_ACTION,
-        },
-      });
-
-      return {
-        paymentIntentId: intent.id,
-        clientSecret: intent.client_secret,
-        amount: depositAmount,
-        currency: 'usd',
-      };
-    } catch (error: any) {
-      this.logger.error('Failed to create Stripe PaymentIntent', error.stack);
-      throw new BadRequestException(`Stripe error: ${error.message}`);
-    }
+    this.logger.log(`Deposit invoice ${invoice.id} created for booking ${bookingId}`);
+    return this.toPaymentLink(payment);
   }
 
   /**
-   * Charges the remaining balance off-session using the saved payment method.
+   * Creates the balance invoice once the move is finished.
    */
-  async chargeRemainingBalance(bookingId: string): Promise<string> {
+  async createBalanceInvoice(bookingId: string): Promise<PaymentLink> {
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
-      include: {
-        quote: true,
-        customer: true,
-      },
+      include: { customer: true },
     });
 
     if (!booking) {
       throw new NotFoundException(`Booking with ID ${bookingId} not found`);
     }
 
-    // Read saved payment method from Booking record directly
-    const paymentMethodId = booking.stripePaymentMethodId;
-    if (!paymentMethodId) {
-      throw new BadRequestException(`No active saved payment method found for Booking ${bookingId} (requires successful deposit first)`);
+    const existing = await this.prisma.payment.findFirst({
+      where: { bookingId, type: PaymentType.BALANCE },
+    });
+
+    if (existing?.status === PaymentStatus.SUCCEEDED) {
+      throw new BadRequestException('The balance for this booking is already paid.');
     }
 
+    if (existing?.jobberInvoiceId) {
+      this.logger.log(`Reusing existing balance invoice for booking ${bookingId}`);
+      return this.toPaymentLink(existing);
+    }
+
+    const jobberCustomerId = await this.ensureJobberCustomer(booking.customerId);
     const balanceAmount = Number(booking.balanceAmount);
-    this.logger.log(`Charging remaining balance for Booking ${bookingId}: Amount: $${balanceAmount}`);
+    const movingDate = booking.requestedDate.toLocaleDateString();
 
-    if (this.isMock || paymentMethodId.includes('mock')) {
-      const mockIntentId = `pi_mock_balance_${Math.floor(Math.random() * 1000000)}`;
+    const invoice = await this.jobber.createInvoice(
+      jobberCustomerId,
+      `Moving balance - ${movingDate}`,
+      `Final balance for move on ${movingDate}`,
+      balanceAmount,
+      `Final balance for your completed move on ${movingDate}. Thank you for choosing us.`,
+    );
 
-      await this.prisma.payment.create({
+    const payment = await this.prisma.payment.create({
+      data: {
+        bookingId: booking.id,
+        type: PaymentType.BALANCE,
+        status: PaymentStatus.AWAITING_PAYMENT,
+        method: PaymentMethod.JOBBER_ONLINE,
+        amount: balanceAmount,
+        jobberInvoiceId: invoice.id,
+        jobberInvoiceNumber: invoice.invoiceNumber,
+        clientHubUri: invoice.clientHubUri,
+      },
+    });
+
+    await this.prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: BookingStatus.BALANCE_PENDING,
+        balanceInvoiceId: invoice.id,
+        balanceInvoiceUrl: invoice.clientHubUri,
+      },
+    });
+
+    this.logger.log(`Balance invoice ${invoice.id} created for booking ${bookingId}`);
+    return this.toPaymentLink(payment);
+  }
+
+  /**
+   * Reconciles a local payment record against Jobber after an invoice webhook.
+   * Returns the payment when it transitioned to paid, otherwise null.
+   */
+  async settleInvoiceIfPaid(invoiceId: string) {
+    const payment = await this.prisma.payment.findUnique({
+      where: { jobberInvoiceId: invoiceId },
+      include: { booking: { include: { customer: true } } },
+    });
+
+    if (!payment) {
+      this.logger.warn(`No local payment record matches Jobber invoice ${invoiceId}`);
+      return null;
+    }
+
+    if (payment.status === PaymentStatus.SUCCEEDED) {
+      this.logger.log(`Invoice ${invoiceId} already settled locally. Skipping.`);
+      return null;
+    }
+
+    const invoice = await this.jobber.getInvoice(invoiceId);
+    const isPaid = invoice.balance <= 0;
+
+    if (!isPaid) {
+      this.logger.log(
+        `Invoice ${invoiceId} still has an outstanding balance of $${invoice.balance}.`,
+      );
+      return null;
+    }
+
+    const updated = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: PaymentStatus.SUCCEEDED,
+        paidAt: new Date(),
+        jobberInvoiceNumber: invoice.invoiceNumber ?? payment.jobberInvoiceNumber,
+      },
+    });
+
+    const nextStatus =
+      payment.type === PaymentType.DEPOSIT
+        ? BookingStatus.DEPOSIT_PAID
+        : BookingStatus.BALANCE_PAID;
+
+    await this.prisma.booking.update({
+      where: { id: payment.bookingId },
+      data: { status: nextStatus },
+    });
+
+    this.logger.log(
+      `Invoice ${invoiceId} paid in Jobber. Booking ${payment.bookingId} -> ${nextStatus}`,
+    );
+
+    return { payment: updated, booking: payment.booking, type: payment.type };
+  }
+
+  /**
+   * Records money collected outside Jobber's online checkout (cash or check).
+   */
+  async recordOfflinePayment(
+    bookingId: string,
+    type: PaymentType,
+    method: PaymentMethod = PaymentMethod.CASH,
+  ) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+
+    if (!booking) {
+      throw new NotFoundException(`Booking with ID ${bookingId} not found`);
+    }
+
+    const amount =
+      type === PaymentType.DEPOSIT
+        ? Number(booking.depositAmount)
+        : Number(booking.balanceAmount);
+
+    const existing = await this.prisma.payment.findFirst({
+      where: { bookingId, type },
+    });
+
+    if (existing) {
+      return this.prisma.payment.update({
+        where: { id: existing.id },
         data: {
-          bookingId: booking.id,
-          stripePaymentIntentId: mockIntentId,
-          amount: balanceAmount,
-          type: PaymentType.BALANCE,
           status: PaymentStatus.SUCCEEDED,
+          method,
           paidAt: new Date(),
         },
       });
-
-      await this.prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: BookingStatus.BALANCE_PAID },
-      });
-
-      this.logger.log(`Mock remaining balance $${balanceAmount} charged successfully.`);
-      return mockIntentId;
     }
 
-    try {
-      // Charge the card off-session (requires confirm: true, off_session: true, and the payment_method ID)
-      const intent = await this.stripe!.paymentIntents.create({
-        amount: Math.round(balanceAmount * 100),
-        currency: 'usd',
-        payment_method: paymentMethodId,
-        off_session: true,
-        confirm: true,
-        description: `Phoenix Moving: Final Balance for booking on ${booking.requestedDate.toLocaleDateString()}`,
-        metadata: { bookingId: booking.id },
-      });
-
-      const isSucceeded = intent.status === 'succeeded';
-
-      await this.prisma.payment.create({
-        data: {
-          bookingId: booking.id,
-          stripePaymentIntentId: intent.id,
-          amount: balanceAmount,
-          type: PaymentType.BALANCE,
-          status: isSucceeded ? PaymentStatus.SUCCEEDED : PaymentStatus.PROCESSING,
-          paidAt: isSucceeded ? new Date() : null,
-        },
-      });
-
-      if (isSucceeded) {
-        await this.prisma.booking.update({
-          where: { id: bookingId },
-          data: { status: BookingStatus.BALANCE_PAID },
-        });
-        this.logger.log(`Stripe remaining balance charge of $${balanceAmount} succeeded.`);
-      } else {
-        await this.prisma.booking.update({
-          where: { id: bookingId },
-          data: { status: BookingStatus.BALANCE_PENDING },
-        });
-        this.logger.error(`Stripe off-session charge did not complete instantly. Status: ${intent.status}`);
-      }
-
-      return intent.id;
-    } catch (error: any) {
-      this.logger.error(`Stripe off-session balance charge failed for Booking ${bookingId}`, error.stack);
-      
-      await this.prisma.booking.update({
-        where: { id: bookingId },
-        data: { status: BookingStatus.BALANCE_PENDING },
-      });
-
-      // Log the failed payment attempt
-      await this.prisma.payment.create({
-        data: {
-          bookingId: booking.id,
-          stripePaymentIntentId: `pi_failed_${Date.now()}`,
-          amount: balanceAmount,
-          type: PaymentType.BALANCE,
-          status: PaymentStatus.FAILED,
-          failureReason: error.message,
-        },
-      });
-
-      throw new BadRequestException(`Stripe Off-Session Charge Failed: ${error.message}`);
-    }
+    return this.prisma.payment.create({
+      data: {
+        bookingId,
+        type,
+        method,
+        status: PaymentStatus.SUCCEEDED,
+        amount,
+        paidAt: new Date(),
+      },
+    });
   }
 
   /**
-   * Helper to construct and verify a Stripe Webhook Event signature.
+   * Jobber Payments refunds are issued from the Jobber dashboard, not the API.
+   * This records the refund locally so reporting stays accurate.
    */
-  constructWebhookEvent(rawBody: string, signature: string, secret: string): Stripe.Event {
-    if (this.isMock) {
-      const mockPayload = JSON.parse(rawBody);
-      return mockPayload as Stripe.Event;
-    }
-    return this.stripe!.webhooks.constructEvent(rawBody, signature, secret);
-  }
-
-  /**
-   * Refunds a successful Stripe charge.
-   */
-  async refundPayment(paymentId: string): Promise<any> {
+  async recordRefund(paymentId: string) {
     const payment = await this.prisma.payment.findUnique({
       where: { id: paymentId },
     });
@@ -249,66 +319,86 @@ export class PaymentsService {
       throw new BadRequestException('Only successful payments can be refunded');
     }
 
-    this.logger.log(`Initiating refund for Payment: ${paymentId}, Intent: ${payment.stripePaymentIntentId}`);
+    await this.prisma.payment.update({
+      where: { id: paymentId },
+      data: { status: PaymentStatus.CANCELLED },
+    });
 
-    if (this.isMock) {
-      // Mark old payment status as cancelled, and insert a REFUND entry for proper audit ledger history
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: { status: PaymentStatus.CANCELLED },
-      });
+    const refund = await this.prisma.payment.create({
+      data: {
+        bookingId: payment.bookingId,
+        type: PaymentType.REFUND,
+        method: payment.method,
+        status: PaymentStatus.SUCCEEDED,
+        amount: payment.amount,
+        jobberInvoiceNumber: payment.jobberInvoiceNumber,
+        paidAt: new Date(),
+      },
+    });
 
-      await this.prisma.payment.create({
-        data: {
-          bookingId: payment.bookingId,
-          type: PaymentType.REFUND,
-          status: PaymentStatus.SUCCEEDED,
-          amount: payment.amount,
-          stripeRefundId: `ref_mock_${Math.floor(Math.random() * 1000000)}`,
-          paidAt: new Date(),
-        },
-      });
+    await this.prisma.booking.update({
+      where: { id: payment.bookingId },
+      data: { status: BookingStatus.REFUNDED },
+    });
 
-      await this.prisma.booking.update({
-        where: { id: payment.bookingId },
-        data: { status: BookingStatus.REFUNDED },
-      });
+    this.logger.log(`Refund recorded for payment ${paymentId}`);
 
-      return { refunded: true, id: payment.stripePaymentIntentId, mock: true };
+    return {
+      refund,
+      message:
+        'Refund recorded. Issue the actual refund from the Jobber dashboard under Payments.',
+    };
+  }
+
+  /**
+   * Current payment state for a booking. The frontend polls this after sending
+   * the customer to Jobber to pay.
+   */
+  async getBookingPaymentStatus(bookingId: string) {
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { payments: { orderBy: { createdAt: 'asc' } } },
+    });
+
+    if (!booking) {
+      throw new NotFoundException(`Booking with ID ${bookingId} not found`);
     }
 
-    try {
-      const refund = await this.stripe!.refunds.create({
-        payment_intent: payment.stripePaymentIntentId || undefined,
-      });
+    const deposit = booking.payments.find((p) => p.type === PaymentType.DEPOSIT);
+    const balance = booking.payments.find((p) => p.type === PaymentType.BALANCE);
 
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: { status: PaymentStatus.CANCELLED },
-      });
+    return {
+      bookingId: booking.id,
+      status: booking.status,
+      depositPaid: deposit?.status === PaymentStatus.SUCCEEDED,
+      balancePaid: balance?.status === PaymentStatus.SUCCEEDED,
+      depositAmount: Number(booking.depositAmount),
+      balanceAmount: Number(booking.balanceAmount),
+      totalAmount: Number(booking.totalAmount),
+      depositInvoiceUrl: booking.depositInvoiceUrl,
+      balanceInvoiceUrl: booking.balanceInvoiceUrl,
+    };
+  }
 
-      // Create refund audit record
-      await this.prisma.payment.create({
-        data: {
-          bookingId: payment.bookingId,
-          type: PaymentType.REFUND,
-          status: PaymentStatus.SUCCEEDED,
-          amount: payment.amount,
-          stripeRefundId: refund.id,
-          paidAt: new Date(),
-        },
-      });
-
-      await this.prisma.booking.update({
-        where: { id: payment.bookingId },
-        data: { status: BookingStatus.REFUNDED },
-      });
-
-      this.logger.log(`Refund successfully processed in Stripe for Payment: ${paymentId}`);
-      return refund;
-    } catch (error: any) {
-      this.logger.error(`Stripe refund failed for Payment ${paymentId}`, error.stack);
-      throw new BadRequestException(`Stripe refund failed: ${error.message}`);
-    }
+  private toPaymentLink(payment: {
+    id: string;
+    jobberInvoiceId: string | null;
+    jobberInvoiceNumber: string | null;
+    clientHubUri: string | null;
+    amount: any;
+    currency: string;
+    type: PaymentType;
+    status: PaymentStatus;
+  }): PaymentLink {
+    return {
+      paymentId: payment.id,
+      invoiceId: payment.jobberInvoiceId || '',
+      invoiceNumber: payment.jobberInvoiceNumber,
+      paymentUrl: payment.clientHubUri,
+      amount: Number(payment.amount),
+      currency: payment.currency,
+      type: payment.type,
+      status: payment.status,
+    };
   }
 }

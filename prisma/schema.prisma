@@ -28,11 +28,18 @@ enum PaymentType {
 }
 
 enum PaymentStatus {
-  REQUIRES_ACTION
+  AWAITING_PAYMENT
   PROCESSING
   SUCCEEDED
   FAILED
   CANCELLED
+}
+
+enum PaymentMethod {
+  JOBBER_ONLINE
+  CASH
+  CHECK
+  OTHER
 }
 
 enum NotificationChannel {
@@ -48,7 +55,6 @@ enum NotificationStatus {
 }
 
 enum WebhookSource {
-  STRIPE
   JOBBER
 }
 
@@ -70,7 +76,6 @@ model Customer {
   state            String?
   zip              String?
   jobberCustomerId String?        @unique @map("jobber_customer_id")
-  stripeCustomerId String?        @unique @map("stripe_customer_id")
   fcmToken         String?        @map("fcm_token")
   quotes           Quote[]
   bookings         Booking[]
@@ -99,25 +104,28 @@ model Quote {
 }
 
 model Booking {
-  id                    String        @id @default(uuid())
-  customerId            String        @map("customer_id")
-  customer              Customer      @relation(fields: [customerId], references: [id])
-  quoteId               String        @unique @map("quote_id")
-  quote                 Quote         @relation(fields: [quoteId], references: [id])
-  status                BookingStatus @default(QUOTED)
-  requestedDate         DateTime      @map("requested_date")
-  confirmedDate         DateTime?     @map("confirmed_date")
-  depositAmount         Decimal       @map("deposit_amount") @db.Decimal(10, 2)
-  balanceAmount         Decimal       @map("balance_amount") @db.Decimal(10, 2)
-  totalAmount           Decimal       @map("total_amount") @db.Decimal(10, 2)
-  jobberJobId           String?       @unique @map("jobber_job_id")
-  stripePaymentMethodId String?       @map("stripe_payment_method_id")
-  payments              Payment[]
-  notifications         Notification[]
-  cancelledAt           DateTime?     @map("cancelled_at")
-  cancellationReason    String?       @map("cancellation_reason")
-  createdAt             DateTime      @default(now()) @map("created_at")
-  updatedAt             DateTime      @updatedAt @map("updated_at")
+  id                 String         @id @default(uuid())
+  customerId         String         @map("customer_id")
+  customer           Customer       @relation(fields: [customerId], references: [id])
+  quoteId            String         @unique @map("quote_id")
+  quote              Quote          @relation(fields: [quoteId], references: [id])
+  status             BookingStatus  @default(QUOTED)
+  requestedDate      DateTime       @map("requested_date")
+  confirmedDate      DateTime?      @map("confirmed_date")
+  depositAmount      Decimal        @map("deposit_amount") @db.Decimal(10, 2)
+  balanceAmount      Decimal        @map("balance_amount") @db.Decimal(10, 2)
+  totalAmount        Decimal        @map("total_amount") @db.Decimal(10, 2)
+  jobberJobId        String?        @unique @map("jobber_job_id")
+  depositInvoiceId   String?        @unique @map("deposit_invoice_id")
+  depositInvoiceUrl  String?        @map("deposit_invoice_url")
+  balanceInvoiceId   String?        @unique @map("balance_invoice_id")
+  balanceInvoiceUrl  String?        @map("balance_invoice_url")
+  payments           Payment[]
+  notifications      Notification[]
+  cancelledAt        DateTime?      @map("cancelled_at")
+  cancellationReason String?        @map("cancellation_reason")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
 
   @@index([customerId])
   @@index([status])
@@ -125,21 +133,22 @@ model Booking {
 }
 
 model Payment {
-  id                    String        @id @default(uuid())
-  bookingId             String        @map("booking_id")
-  booking               Booking       @relation(fields: [bookingId], references: [id])
-  type                  PaymentType
-  status                PaymentStatus @default(REQUIRES_ACTION)
-  amount                Decimal       @db.Decimal(10, 2)
-  currency              String        @default("usd")
-  stripePaymentIntentId String?       @unique @map("stripe_payment_intent_id")
-  stripeChargeId        String?       @map("stripe_charge_id")
-  stripeRefundId        String?       @map("stripe_refund_id")
-  failureReason         String?       @map("failure_reason")
-  retryCount            Int           @default(0) @map("retry_count")
-  paidAt                DateTime?     @map("paid_at")
-  createdAt             DateTime      @default(now()) @map("created_at")
-  updatedAt             DateTime      @updatedAt @map("updated_at")
+  id                  String         @id @default(uuid())
+  bookingId           String         @map("booking_id")
+  booking             Booking        @relation(fields: [bookingId], references: [id])
+  type                PaymentType
+  status              PaymentStatus  @default(AWAITING_PAYMENT)
+  method              PaymentMethod  @default(JOBBER_ONLINE)
+  amount              Decimal        @db.Decimal(10, 2)
+  currency            String         @default("usd")
+  jobberInvoiceId     String?        @unique @map("jobber_invoice_id")
+  jobberInvoiceNumber String?        @map("jobber_invoice_number")
+  jobberPaymentId     String?        @map("jobber_payment_id")
+  clientHubUri        String?        @map("client_hub_uri")
+  failureReason       String?        @map("failure_reason")
+  paidAt              DateTime?      @map("paid_at")
+  createdAt           DateTime       @default(now()) @map("created_at")
+  updatedAt           DateTime       @updatedAt @map("updated_at")
 
   @@index([bookingId])
   @@index([status])

@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationChannel, NotificationStatus } from '../generated/prisma/client';
 import * as nodemailer from 'nodemailer';
-import { Twilio } from 'twilio';
+import { Telnyx } from 'telnyx';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { SendNotificationDto, RegisterFcmTokenDto } from './notifications.dto';
@@ -16,9 +16,9 @@ export class NotificationsService {
   private mailTransporter?: nodemailer.Transporter;
   private emailFrom = 'no-reply@movingphoenix.com';
   
-  // Twilio Client
-  private twilioClient?: Twilio;
-  private twilioPhone?: string;
+  // Telnyx Client
+  private telnyxClient?: Telnyx;
+  private telnyxPhone?: string;
 
   // Firebase Cloud Messaging (FCM)
   private fcmEnabled = false;
@@ -34,7 +34,9 @@ export class NotificationsService {
 
   private initializeEmail() {
     const smtpHost = this.configService.get<string>('SMTP_HOST');
-    const smtpPort = this.configService.get<number>('SMTP_PORT') || 587;
+    // ConfigService hands back the raw .env string, so this must be coerced
+    // before the implicit-TLS comparison below.
+    const smtpPort = Number(this.configService.get('SMTP_PORT')) || 587;
     const smtpUser = this.configService.get<string>('SMTP_USER');
     const smtpPass = this.configService.get<string>('SMTP_PASS');
     this.emailFrom = this.configService.get<string>('EMAIL_FROM') || 'no-reply@movingphoenix.com';
@@ -43,6 +45,7 @@ export class NotificationsService {
       this.mailTransporter = nodemailer.createTransport({
         host: smtpHost,
         port: smtpPort,
+        // Port 465 is implicit TLS; 587 upgrades via STARTTLS.
         secure: smtpPort === 465,
         auth: {
           user: smtpUser,
@@ -56,15 +59,19 @@ export class NotificationsService {
   }
 
   private initializeSMS() {
-    const accountSid = this.configService.get<string>('TWILIO_ACCOUNT_SID');
-    const authToken = this.configService.get<string>('TWILIO_AUTH_TOKEN');
-    this.twilioPhone = this.configService.get<string>('TWILIO_PHONE_NUMBER');
+    const apiKey = this.configService.get<string>('TELNYX_API_KEY');
+    this.telnyxPhone = this.configService.get<string>('TELNYX_PHONE_NUMBER');
 
-    if (accountSid && authToken && this.twilioPhone) {
-      this.twilioClient = new Twilio(accountSid, authToken);
-      this.logger.log('Twilio SMS Client initialized successfully.');
+    const hasRealKey =
+      !!apiKey &&
+      !apiKey.includes('mock') &&
+      !apiKey.includes('YOUR_TELNYX');
+
+    if (hasRealKey && this.telnyxPhone && !this.telnyxPhone.includes('YOUR_TELNYX')) {
+      this.telnyxClient = new Telnyx({ apiKey });
+      this.logger.log('Telnyx SMS Client initialized successfully.');
     } else {
-      this.logger.warn('Twilio credentials missing. SMS alerts will run in sandbox/mock mode.');
+      this.logger.warn('Telnyx credentials missing or invalid. SMS alerts will run in sandbox/mock mode.');
     }
   }
 
@@ -197,16 +204,32 @@ export class NotificationsService {
     }
   }
 
+  private formatE164(phone: string): string {
+    const trimmed = phone.trim();
+    const digits = trimmed.replace(/\D/g, '');
+
+    if (trimmed.startsWith('+')) {
+      return `+${digits}`;
+    }
+    if (digits.length === 10) {
+      return `+1${digits}`;
+    }
+    if (digits.length === 11 && digits.startsWith('1')) {
+      return `+${digits}`;
+    }
+    return digits ? `+${digits}` : trimmed;
+  }
+
   private async sendSMS(to: string, body: string): Promise<string> {
-    if (this.twilioClient && this.twilioPhone) {
-      const message = await this.twilioClient.messages.create({
-        from: this.twilioPhone,
-        to,
-        body,
+    if (this.telnyxClient && this.telnyxPhone) {
+      const response = await this.telnyxClient.messages.send({
+        from: this.formatE164(this.telnyxPhone),
+        to: this.formatE164(to),
+        text: body,
       });
-      return message.sid;
+      return response.data?.id || `telnyx_${Date.now()}`;
     } else {
-      this.logger.log(`[TWILIO MOCK SMS] To: ${to} | Body: ${body}`);
+      this.logger.log(`[TELNYX MOCK SMS] To: ${to} | Body: ${body}`);
       return `sms_mock_${Math.floor(Math.random() * 1000000)}`;
     }
   }
@@ -265,10 +288,10 @@ export class NotificationsService {
     customerName: string,
     amount: number,
     type: 'DEPOSIT' | 'BALANCE',
-    paymentIntentId: string,
+    invoiceReference: string,
   ) {
     const emailSubject = `Payment Receipt - ${type} Received`;
-    const emailBody = `Dear ${customerName},\n\nPayment Successful!\n\nType: ${type}\nAmount: $${amount.toFixed(2)}\nTransaction: ${paymentIntentId}\n\nPhoenix Moving Team`;
+    const emailBody = `Dear ${customerName},\n\nPayment Successful!\n\nType: ${type}\nAmount: $${amount.toFixed(2)}\nInvoice: ${invoiceReference}\n\nPhoenix Moving Team`;
 
     await this.dispatchNotification({
       customerId,
@@ -278,6 +301,71 @@ export class NotificationsService {
       title: emailSubject,
       body: emailBody,
     });
+  }
+
+  /**
+   * Sends the Jobber Client Hub payment link over every channel the customer
+   * has. This is how money is now requested — the customer pays inside Jobber.
+   */
+  async sendPaymentRequest(
+    bookingId: string,
+    customerId: string,
+    customerName: string,
+    amount: number,
+    type: 'DEPOSIT' | 'BALANCE',
+    paymentUrl: string | null,
+    movingDate: Date,
+  ) {
+    const formattedDate = new Date(movingDate).toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+    const label = type === 'DEPOSIT' ? 'deposit' : 'final balance';
+    const linkLine = paymentUrl
+      ? `Pay securely here: ${paymentUrl}`
+      : 'Your invoice is on its way from our office.';
+
+    const emailSubject =
+      type === 'DEPOSIT'
+        ? 'Phoenix Moving Company - Reserve Your Date'
+        : 'Phoenix Moving Company - Final Invoice';
+
+    const emailBody =
+      type === 'DEPOSIT'
+        ? `Dear ${customerName},\n\nYour move is booked for ${formattedDate}.\n\nTo lock in this date, please pay your ${label} of $${amount.toFixed(2)}.\n\n${linkLine}\n\nYour date is held until the deposit is received.\n\nPhoenix Moving Team`
+        : `Dear ${customerName},\n\nYour move on ${formattedDate} is complete. Thank you!\n\nYour ${label} of $${amount.toFixed(2)} is now due.\n\n${linkLine}\n\nPhoenix Moving Team`;
+
+    await this.dispatchNotification({
+      customerId,
+      bookingId,
+      channel: NotificationChannel.EMAIL,
+      type: type === 'DEPOSIT' ? 'deposit_request' : 'balance_request',
+      title: emailSubject,
+      body: emailBody,
+    });
+
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+    });
+
+    if (customer?.phone) {
+      await this.sendSmsConfirmation(
+        bookingId,
+        customerId,
+        customer.phone,
+        `Hi ${customer.firstName}, your ${label} of $${amount.toFixed(2)} for the ${formattedDate} move is ready. ${linkLine}`,
+      );
+    }
+
+    await this.sendPushConfirmation(
+      bookingId,
+      customerId,
+      type === 'DEPOSIT' ? 'Reserve Your Moving Date' : 'Final Invoice Ready',
+      `Your ${label} of $${amount.toFixed(2)} is ready to pay.`,
+    );
   }
 
   async sendSmsConfirmation(

@@ -39,4 +39,9 @@ export class CreateBookingDto {
   @IsString()
   @IsOptional()
   addressLine2?: string;
+
+  @ApiProperty({ example: 'fcm_token_123', required: false })
+  @IsString()
+  @IsOptional()
+  fcmToken?: string;
 }
