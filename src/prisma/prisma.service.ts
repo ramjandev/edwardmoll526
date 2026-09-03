@@ -18,10 +18,12 @@ export class PrismaService
   private pool: Pool;
 
   constructor(configService: ConfigService) {
-    const databaseUrl = configService.get<string>('DATABASE_URL');
+    let databaseUrl = configService.get<string>('DATABASE_URL');
     if (!databaseUrl) {
       throw new Error('DATABASE_URL environment variable is not defined');
     }
+    // Render (and .env copies) often wrap the value in quotes; Node's URL parser rejects those.
+    databaseUrl = databaseUrl.trim().replace(/^['"]|['"]$/g, '');
 
     const parsed = new URL(databaseUrl);
     const isRender = parsed.hostname.includes('render.com');
