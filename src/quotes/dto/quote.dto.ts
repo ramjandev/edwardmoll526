@@ -46,21 +46,50 @@ export class CreateQuoteDto {
   @IsOptional()
   zip?: string;
 
-  @ApiProperty({ example: '2 Bedroom Apartment', description: 'Moving size / type' })
+  @ApiProperty({ example: 'Apartment', description: 'Residence type from Quote Calculator B4' })
   @IsString()
   @IsNotEmpty()
   houseSize!: string;
 
-  @ApiProperty({ example: 2, description: 'Number of flights of stairs' })
+  @ApiProperty({ example: 2, required: false, description: 'Bedrooms (1-4) for Quote Calculator B5' })
+  @IsNumber()
+  @IsOptional()
+  bedrooms?: number;
+
+  @ApiProperty({ example: 2, description: 'Number of flights of stairs (fallback if access fields are omitted)' })
   @IsNumber()
   stairs!: number;
 
-  @ApiProperty({ example: ['Piano', 'Pool Table'], type: [String], description: 'List of heavy items' })
+  @ApiProperty({ example: 'No stairs', required: false, description: 'Origin access for Quote Calculator B6' })
+  @IsString()
+  @IsOptional()
+  originAccess?: string;
+
+  @ApiProperty({ example: 'No stairs', required: false, description: 'Destination access for Quote Calculator B7' })
+  @IsString()
+  @IsOptional()
+  destinationAccess?: string;
+
+  @ApiProperty({ example: 'None', required: false, description: 'Elevator wait / long carry for Quote Calculator B8' })
+  @IsString()
+  @IsOptional()
+  elevatorWait?: string;
+
+  @ApiProperty({ example: ['Upright piano'], type: [String], description: 'Specialty item types matching the sheet dropdowns' })
   @IsArray()
   @IsString({ each: true })
   heavyItems!: string[];
 
-  @ApiProperty({ example: 15, description: 'Estimated distance of the move in miles' })
+  @ApiProperty({ example: 15, description: 'Move distance in miles (Quote Calculator B10)' })
   @IsNumber()
   distance!: number;
+
+  @ApiProperty({
+    example: 'None',
+    required: false,
+    description: 'Packing help: None, Partial, or Full (Quote Calculator B9).',
+  })
+  @IsString()
+  @IsOptional()
+  packingHelp?: string;
 }

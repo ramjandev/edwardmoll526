@@ -21,29 +21,35 @@ export class AuthService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Seed default admin if database is empty
-    const adminCount = await this.prisma.adminUser.count();
-    if (adminCount === 0) {
-      const defaultEmail = 'admin@gmail.com';
-      const defaultPassword = 'Admin@1234';
-      const passwordHash = await bcrypt.hash(defaultPassword, 10);
+    try {
+      const adminCount = await this.prisma.adminUser.count();
+      if (adminCount === 0) {
+        const defaultEmail = 'admin@gmail.com';
+        const defaultPassword = 'Admin@1234';
+        const passwordHash = await bcrypt.hash(defaultPassword, 10);
 
-      await this.prisma.adminUser.create({
-        data: {
-          email: defaultEmail,
-          passwordHash,
-          role: AdminRole.OWNER,
-        },
-      });
+        await this.prisma.adminUser.create({
+          data: {
+            email: defaultEmail,
+            passwordHash,
+            role: AdminRole.OWNER,
+          },
+        });
 
-      this.logger.warn('----------------------------------------------------');
-      this.logger.warn('NO ADMIN USERS FOUND. SEEDED DEFAULT ADMIN ACCOUNT:');
-      this.logger.warn(`Email: ${defaultEmail}`);
-      this.logger.warn(`Password: ${defaultPassword}`);
-      this.logger.warn(
-        'PLEASE CHANGE THIS PASSWORD IMMEDIATELY IN PRODUCTION!',
+        this.logger.warn('----------------------------------------------------');
+        this.logger.warn('NO ADMIN USERS FOUND. SEEDED DEFAULT ADMIN ACCOUNT:');
+        this.logger.warn(`Email: ${defaultEmail}`);
+        this.logger.warn(`Password: ${defaultPassword}`);
+        this.logger.warn(
+          'PLEASE CHANGE THIS PASSWORD IMMEDIATELY IN PRODUCTION!',
+        );
+        this.logger.warn('----------------------------------------------------');
+      }
+    } catch (error) {
+      this.logger.error(
+        'Could not seed admin user. PostgreSQL is unavailable — quotes will fail until DATABASE_URL works.',
+        error instanceof Error ? error.stack : undefined,
       );
-      this.logger.warn('----------------------------------------------------');
     }
   }
 

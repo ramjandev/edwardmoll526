@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '../generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PrismaService.name);
   private pool: Pool;
 
   constructor(configService: ConfigService) {
@@ -14,19 +15,40 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       throw new Error('DATABASE_URL environment variable is not defined');
     }
 
+    const parsed = new URL(databaseUrl);
+    const isRender = parsed.hostname.includes('render.com');
+    // pg treats sslmode=require as verify-full, which drops Render connections.
+    parsed.searchParams.delete('sslmode');
+    // Render (and other TLS proxies) cannot complete SCRAM channel binding.
+    parsed.searchParams.set('channel_binding', 'disable');
+
     const pool = new Pool({
-      connectionString: databaseUrl,
-      // Render PostgreSQL requires SSL when connecting externally
-      ssl: databaseUrl.includes('render.com') ? { rejectUnauthorized: false } : undefined,
+      connectionString: parsed.toString(),
+      ssl: isRender ? { rejectUnauthorized: false } : undefined,
+      max: 5,
+      keepAlive: true,
+      connectionTimeoutMillis: 20000,
+      idleTimeoutMillis: 30000,
     });
     const adapter = new PrismaPg(pool);
 
     super({ adapter });
     this.pool = pool;
+    this.pool.on('error', (err) => {
+      this.logger.error(`Unexpected PostgreSQL pool error: ${err.message}`);
+    });
   }
 
   async onModuleInit() {
-    await this.$connect();
+    try {
+      await this.$connect();
+      this.logger.log('PostgreSQL connected.');
+    } catch (error) {
+      this.logger.error(
+        'PostgreSQL is unreachable. Instant quotes will still be priced from the Google Sheet; bookings need a working DATABASE_URL (resume Render or use local Postgres).',
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
   }
 
   async onModuleDestroy() {
