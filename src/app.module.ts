@@ -3,14 +3,14 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
-import { SheetsModule } from './sheets/sheets.module';
 import { AuthModule } from './auth/auth.module';
-import { NotificationsModule } from './notifications/notifications.module';
-import { JobberModule } from './jobber/jobber.module';
-import { PaymentsModule } from './payments/payments.module';
-import { BookingsModule } from './bookings/bookings.module';
-import { QuotesModule } from './quotes/quotes.module';
 import { AdminModule } from './admin/admin.module';
+import { ServicesModule } from './services/services.module';
+import { GalleryModule } from './gallery/gallery.module';
+import { PostsModule } from './posts/posts.module';
+import { ContactModule } from './contact/contact.module';
+import { UploadModule } from './upload/upload.module';
+import { MailerModule } from './mailer/mailer.module';
 
 @Module({
   imports: [
@@ -19,14 +19,14 @@ import { AdminModule } from './admin/admin.module';
       isGlobal: true,
     }),
     PrismaModule,
-    SheetsModule,
     AuthModule,
-    NotificationsModule,
-    JobberModule,
-    PaymentsModule,
-    BookingsModule,
-    QuotesModule,
     AdminModule,
+    ServicesModule,
+    GalleryModule,
+    PostsModule,
+    ContactModule,
+    UploadModule,
+    MailerModule,
   ],
   controllers: [AppController],
   providers: [AppService],

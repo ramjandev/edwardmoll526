@@ -55,7 +55,7 @@ export class PrismaService
       this.logger.log('PostgreSQL connected.');
     } catch (error) {
       this.logger.error(
-        'PostgreSQL is unreachable. Instant quotes will still be priced from the Google Sheet; bookings need a working DATABASE_URL (resume Render or use local Postgres).',
+        'PostgreSQL is unreachable. Please check your DATABASE_URL configuration.',
         error instanceof Error ? error.stack : undefined,
       );
     }

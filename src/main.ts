@@ -4,14 +4,18 @@ import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
-    // Crucial: Enables access to req.rawBody for Jobber webhook HMAC validation
-    rawBody: true,
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // Serve uploaded images statically
+  app.useStaticAssets(join(process.cwd(), 'uploads'), {
+    prefix: '/uploads/',
   });
 
-  // Enable CORS so the Lovable frontend can consume the API
+  // Enable CORS so the frontend can consume the API
   app.enableCors();
 
   // Standardize successful API responses globally
@@ -32,7 +36,7 @@ async function bootstrap() {
   const config = new DocumentBuilder()
     .setTitle('Moving Company API')
     .setDescription(
-      'Backend managing quotes (Google Sheets), bookings, and Jobber synchronization. Card payments are collected by Jobber Payments through Client Hub invoice links.',
+      'Backend API for AAAAAffordable Moving informational website. Manages services, gallery, blog posts, and contact inquiries.'
     )
     .setVersion('1.0')
     .addBearerAuth() // for Admin JWT operations

@@ -67,7 +67,7 @@ export class AuthService implements OnModuleInit {
       data: {
         email: dto.email.toLowerCase(),
         passwordHash,
-        role: dto.role || AdminRole.STAFF,
+        role: dto.role || AdminRole.ADMIN,
       },
     });
 
